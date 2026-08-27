@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ask My Docs</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Ask My Docs</h1>
+      <p class="lede">
+        Chat over files in <code>docs/</code>. Ingest and ask are stubbed until
+        you implement the RAG pipeline.
+      </p>
+      <div class="toolbar">
+        <button type="button" class="secondary" id="ingest">Ingest docs</button>
+      </div>
+      <p class="status" id="status"></p>
+      <div id="log"></div>
+    </main>
+    <form id="ask-form">
+      <div class="composer">
+        <textarea
+          id="question"
+          rows="1"
+          placeholder="Ask a question about your docs"
+          required
+        ></textarea>
+        <button type="submit">Ask</button>
+      </div>
+    </form>
+    <script>
+      const log = document.getElementById("log");
+      const statusEl = document.getElementById("status");
+      const form = document.getElementById("ask-form");
+      const questionEl = document.getElementById("question");
+      const ingestBtn = document.getElementById("ingest");
+
+      function setStatus(text, isError = false) {
+        statusEl.textContent = text;
+        statusEl.classList.toggle("error", isError);
+      }
+
+      function addMessage(role, text, citations) {
+        const wrap = document.createElement("div");
+        wrap.className = `msg ${role}`;
+        const label = document.createElement("span");
+        label.className = "label";
+        label.textContent = role === "user" ? "You" : "Docs";
+        wrap.appendChild(label);
+        wrap.appendChild(document.createTextNode(text));
+        if (citations && citations.length) {
+          const cite = document.createElement("div");
+          cite.className = "citations";
+          cite.textContent = "Sources: " + citations.map((c) => c.source).join(", ");
+          wrap.appendChild(cite);
+        }
+        log.appendChild(wrap);
+        wrap.scrollIntoView({ behavior: "smooth", block: "end" });
+      }
+
+      async function readError(response) {
+        try {
+          const data = await response.json();
+          return data.detail || JSON.stringify(data);
+        } catch {
+          return `HTTP ${response.status}`;
+        }
+      }
+
+      ingestBtn.addEventListener("click", async () => {
+        ingestBtn.disabled = true;
+        setStatus("Ingesting…");
+        try {
+          const response = await fetch("/api/ingest", { method: "POST" });
+          if (!response.ok) {
+            setStatus(await readError(response), true);
+            return;
+          }
+          const data = await response.json();
+          setStatus(data.message || "Ingest complete.");
+        } catch (err) {
+          setStatus(String(err), true);
+        } finally {
+          ingestBtn.disabled = false;
+        }
+      });
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const question = questionEl.value.trim();
+        if (!question) return;
+        addMessage("user", question);
+        questionEl.value = "";
+        setStatus("Thinking…");
+        try {
+          const response = await fetch("/api/ask", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question }),
+          });
+          if (!response.ok) {
+            const detail = await readError(response);
+            addMessage("bot", detail);
+            setStatus(detail, true);
+            return;
+          }
+          const data = await response.json();
+          addMessage("bot", data.answer, data.citations);
+          setStatus("");
+        } catch (err) {
+          setStatus(String(err), true);
+        }
+      });
+    </script>
+  </body>
+</html>
