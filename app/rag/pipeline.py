@@ -2,7 +2,7 @@
 
 Implement these yourself, in this order:
 
-1. load_documents  — read text from settings.docs_dir
+1. load_documents  — read text from settings.docs_dir (done)
 2. chunk_text      — split documents into overlapping chunks with metadata
 3. ingest          — embed chunks and store them locally
 4. search          — embed the question, return top_k chunks
@@ -16,12 +16,29 @@ Citations must come from retrieved chunk metadata, not from the model inventing 
 
 from pathlib import Path
 
+from app.config import PROJECT_ROOT
 from app.models import AskResponse, IngestResponse
+
+_ALLOWED_SUFFIXES = {".md", ".txt"}
 
 
 def load_documents(docs_dir: Path) -> list[dict]:
-    """Return a list of {path, text} dicts for files under docs_dir."""
-    raise NotImplementedError("Implement document loading.")
+    """Return a list of {path, text} dicts for markdown/text files under docs_dir."""
+    docs_dir = Path(docs_dir).expanduser().resolve()
+    if not docs_dir.is_dir():
+        raise FileNotFoundError(f"Docs directory not found: {docs_dir}")
+
+    documents: list[dict] = []
+    for path in sorted(docs_dir.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in _ALLOWED_SUFFIXES:
+            continue
+        text = path.read_text(encoding="utf-8")
+        try:
+            stored_path = path.relative_to(PROJECT_ROOT).as_posix()
+        except ValueError:
+            stored_path = path.as_posix()
+        documents.append({"path": stored_path, "text": text})
+    return documents
 
 
 def chunk_text(documents: list[dict]) -> list[dict]:
