@@ -3,7 +3,7 @@
 Implement these yourself, in this order:
 
 1. load_documents  — read text from settings.docs_dir (done)
-2. chunk_text      — split documents into overlapping chunks with metadata
+2. chunk_text      — split documents into overlapping chunks with metadata (done)
 3. ingest          — embed chunks and store them locally
 4. search          — embed the question, return top_k chunks
 5. build_prompt    — system instructions + retrieved context + question
@@ -14,12 +14,18 @@ Do not skip search debugging: print retrieved chunks before wiring the LLM.
 Citations must come from retrieved chunk metadata, not from the model inventing filenames.
 """
 
+import re
 from pathlib import Path
 
 from app.config import PROJECT_ROOT
 from app.models import AskResponse, IngestResponse
 
 _ALLOWED_SUFFIXES = {".md", ".txt"}
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+# Rough char stand-in for tokens (~4 chars/token): ~500 target, ~800 max, ~80 overlap.
+_TARGET_CHARS = 2000
+_MAX_CHARS = 3200
+_OVERLAP_CHARS = 320
 
 
 def load_documents(docs_dir: Path) -> list[dict]:
@@ -41,9 +47,111 @@ def load_documents(docs_dir: Path) -> list[dict]:
     return documents
 
 
+def _split_into_sections(text: str) -> list[tuple[str | None, str]]:
+    """Split markdown into (heading, section_text) pairs. Heading may be None."""
+    sections: list[tuple[str | None, str]] = []
+    heading: str | None = None
+    buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal heading, buf
+        body = "".join(buf).strip()
+        if body:
+            sections.append((heading, body))
+        buf = []
+
+    for line in text.splitlines(keepends=True):
+        match = _HEADING_RE.match(line.rstrip("\n"))
+        if match:
+            flush()
+            heading = match.group(2).strip()
+            buf = [line]
+        else:
+            buf.append(line)
+    flush()
+    return sections
+
+
+def _overlap_tail(text: str) -> str:
+    if len(text) <= _OVERLAP_CHARS:
+        return text
+    tail = text[-_OVERLAP_CHARS:]
+    space = tail.find(" ")
+    if space != -1:
+        tail = tail[space + 1 :]
+    return tail.strip()
+
+
+def _split_long_paragraph(text: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    length = len(text)
+    while start < length:
+        end = min(start + _TARGET_CHARS, length)
+        if end < length:
+            cut = text.rfind(" ", start, end)
+            if cut > start:
+                end = cut
+        piece = text[start:end].strip()
+        if piece:
+            parts.append(piece)
+        if end >= length:
+            break
+        start = end
+        while start < length and text[start] == " ":
+            start += 1
+    return parts or [text]
+
+
+def _pack_paragraphs(paragraphs: list[str]) -> list[str]:
+    units: list[str] = []
+    for paragraph in paragraphs:
+        if len(paragraph) > _MAX_CHARS:
+            units.extend(_split_long_paragraph(paragraph))
+        else:
+            units.append(paragraph)
+
+    packed: list[str] = []
+    buf = ""
+    for unit in units:
+        candidate = f"{buf}\n\n{unit}" if buf else unit
+        if buf and len(candidate) > _TARGET_CHARS:
+            packed.append(buf)
+            tail = _overlap_tail(buf)
+            buf = f"{tail}\n\n{unit}" if tail else unit
+        else:
+            buf = candidate
+    if buf:
+        packed.append(buf)
+    return packed
+
+
 def chunk_text(documents: list[dict]) -> list[dict]:
     """Return chunks with text plus metadata (source, chunk_index, heading)."""
-    raise NotImplementedError("Implement chunking.")
+    chunks: list[dict] = []
+    for document in documents:
+        text = (document.get("text") or "").strip()
+        if not text:
+            continue
+        source = document["path"]
+        chunk_index = 0
+        for heading, section in _split_into_sections(text):
+            paragraphs = [
+                part.strip() for part in re.split(r"\n\s*\n", section) if part.strip()
+            ]
+            if not paragraphs:
+                continue
+            for part in _pack_paragraphs(paragraphs):
+                chunks.append(
+                    {
+                        "text": part,
+                        "source": source,
+                        "chunk_index": chunk_index,
+                        "heading": heading,
+                    }
+                )
+                chunk_index += 1
+    return chunks
 
 
 def ingest() -> IngestResponse:
