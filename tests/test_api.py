@@ -1,5 +1,10 @@
+from pathlib import Path
+
+import pytest
 from fastapi.testclient import TestClient
 
+import app.rag.pipeline as pipeline
+from app.config import settings
 from app.main import app
 
 client = TestClient(app)
@@ -17,10 +22,38 @@ def test_index_serves_chat_page() -> None:
     assert "Ask My Docs" in response.text
 
 
-def test_ingest_is_stubbed() -> None:
+def test_ingest_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "index_path", tmp_path / "index.json")
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts: [[1.0, 0.0] for _ in texts],
+    )
+
     response = client.post("/api/ingest")
-    assert response.status_code == 501
-    assert "not implemented" in response.json()["detail"].lower()
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["document_count"] == 3
+    assert body["chunk_count"] >= 1
+    assert (tmp_path / "index.json").is_file()
+
+
+def test_ingest_reports_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "llm_api_key", "  ")
+    response = client.post("/api/ingest")
+    assert response.status_code == 400
+    assert "llm_api_key" in response.json()["detail"].lower()
+
+
+def test_ingest_missing_docs_returns_400(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "docs_dir", tmp_path / "missing")
+    monkeypatch.setattr(settings, "index_path", tmp_path / "index.json")
+    response = client.post("/api/ingest")
+    assert response.status_code == 400
+    assert "not found" in response.json()["detail"].lower()
 
 
 def test_ask_is_stubbed() -> None:

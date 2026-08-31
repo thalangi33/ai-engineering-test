@@ -25,6 +25,10 @@ def ingest() -> IngestResponse:
         return pipeline.ingest()
     except NotImplementedError as exc:
         raise _not_implemented() from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/ask", response_model=AskResponse)

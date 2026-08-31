@@ -4,7 +4,7 @@ Implement these yourself, in this order:
 
 1. load_documents  — read text from settings.docs_dir (done)
 2. chunk_text      — split documents into overlapping chunks with metadata (done)
-3. ingest          — embed chunks and store them locally
+3. ingest          — embed chunks and store them locally (done)
 4. search          — embed the question, return top_k chunks
 5. build_prompt    — system instructions + retrieved context + question
 6. ask_llm         — call the provider; temperature 0
@@ -14,10 +14,13 @@ Do not skip search debugging: print retrieved chunks before wiring the LLM.
 Citations must come from retrieved chunk metadata, not from the model inventing filenames.
 """
 
+import json
 import re
 from pathlib import Path
 
-from app.config import PROJECT_ROOT
+import httpx
+
+from app.config import PROJECT_ROOT, settings
 from app.models import AskResponse, IngestResponse
 
 _ALLOWED_SUFFIXES = {".md", ".txt"}
@@ -26,6 +29,8 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _TARGET_CHARS = 2000
 _MAX_CHARS = 3200
 _OVERLAP_CHARS = 320
+_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
+_EMBED_BATCH_SIZE = 64
 
 
 def load_documents(docs_dir: Path) -> list[dict]:
@@ -154,9 +159,91 @@ def chunk_text(documents: list[dict]) -> list[dict]:
     return chunks
 
 
+def _resolved_index_path() -> Path:
+    path = Path(settings.index_path).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path
+
+
+def _write_index(payload: dict) -> Path:
+    path = _resolved_index_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+    tmp_path.replace(path)
+    return path
+
+
+def _embed_texts(texts: list[str]) -> list[list[float]]:
+    """Return one embedding vector per text using the configured model."""
+    if not texts:
+        return []
+    api_key = (settings.llm_api_key or "").strip()
+    if not api_key:
+        raise ValueError("LLM_API_KEY is required to embed documents.")
+
+    vectors: list[list[float] | None] = [None] * len(texts)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            for start in range(0, len(texts), _EMBED_BATCH_SIZE):
+                batch = texts[start : start + _EMBED_BATCH_SIZE]
+                response = client.post(
+                    _EMBEDDINGS_URL,
+                    headers=headers,
+                    json={"model": settings.embedding_model, "input": batch},
+                )
+                response.raise_for_status()
+                for item in response.json()["data"]:
+                    vectors[start + item["index"]] = item["embedding"]
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text.strip() or exc.response.reason_phrase
+        raise RuntimeError(
+            f"Embedding request failed ({exc.response.status_code}): {detail}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Embedding request failed: {exc}") from exc
+
+    if any(vector is None for vector in vectors):
+        raise RuntimeError("Embedding response was missing one or more vectors.")
+    return [vector for vector in vectors if vector is not None]
+
+
 def ingest() -> IngestResponse:
     """Load, chunk, embed, and persist the vector index."""
-    raise NotImplementedError("Implement ingest.")
+    documents = load_documents(settings.docs_dir)
+    chunks = chunk_text(documents)
+    embeddings = _embed_texts([chunk["text"] for chunk in chunks])
+    stored = [
+        {
+            "text": chunk["text"],
+            "source": chunk["source"],
+            "chunk_index": chunk["chunk_index"],
+            "heading": chunk["heading"],
+            "embedding": embedding,
+        }
+        for chunk, embedding in zip(chunks, embeddings, strict=True)
+    ]
+    _write_index(
+        {
+            "embedding_model": settings.embedding_model,
+            "chunks": stored,
+        }
+    )
+    return IngestResponse(
+        status="ok",
+        message=(
+            f"Ingested {len(documents)} documents into {len(stored)} chunks."
+            if stored
+            else "No chunks to ingest."
+        ),
+        document_count=len(documents),
+        chunk_count=len(stored),
+    )
 
 
 def search(question: str) -> list[dict]:

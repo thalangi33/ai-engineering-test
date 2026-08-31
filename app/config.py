@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     reload: bool = True
 
     docs_dir: Path = PROJECT_ROOT / "docs"
+    index_path: Path = PROJECT_ROOT / "data" / "index.json"
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
     embedding_model: str = "text-embedding-3-small"
