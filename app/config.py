@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     docs_dir: Path = PROJECT_ROOT / "docs"
     index_path: Path = PROJECT_ROOT / "data" / "index.json"
     llm_api_key: str = ""
+    gemini_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
+    # text-embedding-3-small | gemini-embedding-001 | all-MiniLM-L6-v2
     embedding_model: str = "text-embedding-3-small"
     top_k: int = 5
     temperature: float = 0.0
