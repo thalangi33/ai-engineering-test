@@ -11,7 +11,8 @@
       <h1>Ask My Docs</h1>
       <p class="lede">
         Chat over files in <code>docs/</code>. Choose an embedding model, ingest,
-        then ask a question.
+        then search. Retrieved chunks are shown so you can check ranking before
+        the LLM is wired.
       </p>
       <div class="toolbar">
         <label class="model-picker" for="embedding-model">
@@ -28,10 +29,10 @@
         <textarea
           id="question"
           rows="1"
-          placeholder="Ask a question about your docs"
+          placeholder="Search your docs (retrieval only)"
           required
         ></textarea>
-        <button type="submit">Ask</button>
+        <button type="submit">Search</button>
       </div>
     </form>
     <script>
@@ -48,7 +49,7 @@
         statusEl.classList.toggle("error", isError);
       }
 
-      function addMessage(role, text, citations) {
+      function addMessage(role, text) {
         const wrap = document.createElement("div");
         wrap.className = `msg ${role}`;
         const label = document.createElement("span");
@@ -56,11 +57,37 @@
         label.textContent = role === "user" ? "You" : "Docs";
         wrap.appendChild(label);
         wrap.appendChild(document.createTextNode(text));
-        if (citations && citations.length) {
-          const cite = document.createElement("div");
-          cite.className = "citations";
-          cite.textContent = "Sources: " + citations.map((c) => c.source).join(", ");
-          wrap.appendChild(cite);
+        log.appendChild(wrap);
+        wrap.scrollIntoView({ behavior: "smooth", block: "end" });
+      }
+
+      function addChunks(chunks) {
+        const wrap = document.createElement("div");
+        wrap.className = "msg bot";
+        const label = document.createElement("span");
+        label.className = "label";
+        label.textContent = "Retrieved";
+        wrap.appendChild(label);
+        if (!chunks.length) {
+          wrap.appendChild(
+            document.createTextNode("No matching chunks. Ingest docs and try again.")
+          );
+        } else {
+          chunks.forEach((chunk, index) => {
+            const item = document.createElement("div");
+            item.className = "chunk";
+            const meta = document.createElement("div");
+            meta.className = "chunk-meta";
+            const score = Number(chunk.score).toFixed(3);
+            const heading = chunk.heading ? ` · ${chunk.heading}` : "";
+            meta.textContent = `${index + 1}. ${chunk.source}${heading} (${score})`;
+            item.appendChild(meta);
+            const body = document.createElement("div");
+            body.className = "chunk-text";
+            body.textContent = chunk.text;
+            item.appendChild(body);
+            wrap.appendChild(item);
+          });
         }
         log.appendChild(wrap);
         wrap.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -127,9 +154,9 @@
         if (!question) return;
         addMessage("user", question);
         questionEl.value = "";
-        setStatus("Thinking…");
+        setStatus("Searching…");
         try {
-          const response = await fetch("/api/ask", {
+          const response = await fetch("/api/search", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ question }),
@@ -141,8 +168,11 @@
             return;
           }
           const data = await response.json();
-          addMessage("bot", data.answer, data.citations);
-          setStatus("");
+          addChunks(data.chunks || []);
+          const count = (data.chunks || []).length;
+          setStatus(
+            count === 1 ? "Retrieved 1 chunk." : `Retrieved ${count} chunks.`
+          );
         } catch (err) {
           setStatus(String(err), true);
         }

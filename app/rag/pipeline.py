@@ -5,7 +5,7 @@ Implement these yourself, in this order:
 1. load_documents  — read text from settings.docs_dir (done)
 2. chunk_text      — split documents into overlapping chunks with metadata (done)
 3. ingest          — embed chunks and store them locally (done)
-4. search          — embed the question, return top_k chunks
+4. search          — embed the question, return top_k chunks (done)
 5. build_prompt    — system instructions + retrieved context + question
 6. ask_llm         — call the provider; temperature 0
 7. ask             — search → prompt → LLM → citations from chunk metadata
@@ -15,6 +15,7 @@ Citations must come from retrieved chunk metadata, not from the model inventing 
 """
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import NoReturn
@@ -186,6 +187,55 @@ def _write_index(payload: dict) -> Path:
     tmp_path.write_text(json.dumps(payload), encoding="utf-8")
     tmp_path.replace(path)
     return path
+
+
+def _read_index() -> dict:
+    path = _resolved_index_path()
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Vector index not found: {path}. Run ingest before search."
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Vector index is not valid JSON: {path}") from exc
+    if not isinstance(payload, dict) or "chunks" not in payload:
+        raise ValueError("Vector index is missing a chunks list. Re-run ingest.")
+    chunks = payload["chunks"]
+    if not isinstance(chunks, list):
+        raise ValueError("Vector index is missing a chunks list. Re-run ingest.")
+    return payload
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right):
+        raise ValueError(
+            "Embedding dimension mismatch: "
+            f"query has {len(left)} dims, chunk has {len(right)}. Re-run ingest."
+        )
+    dot = 0.0
+    norm_left = 0.0
+    norm_right = 0.0
+    for x, y in zip(left, right, strict=True):
+        dot += x * y
+        norm_left += x * x
+        norm_right += y * y
+    if norm_left == 0.0 or norm_right == 0.0:
+        return 0.0
+    return dot / (math.sqrt(norm_left) * math.sqrt(norm_right))
+
+
+def _print_search_results(question: str, results: list[dict]) -> None:
+    print(f"[search] {question!r} → {len(results)} chunk(s)")
+    for index, chunk in enumerate(results, start=1):
+        heading = f" / {chunk['heading']}" if chunk.get("heading") else ""
+        snippet = " ".join(chunk["text"].split())
+        if len(snippet) > 160:
+            snippet = snippet[:157] + "..."
+        print(
+            f"  {index}. {chunk['score']:.3f}  {chunk['source']}{heading}\n"
+            f"     {snippet}"
+        )
 
 
 def _embedding_backend(model: str) -> str:
@@ -385,9 +435,51 @@ def ingest(embedding_model: str | None = None) -> IngestResponse:
     )
 
 
-def search(question: str) -> list[dict]:
+def search(question: str, top_k: int | None = None) -> list[dict]:
     """Return the top_k most similar chunks for the question."""
-    raise NotImplementedError("Implement retrieval.")
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("Question must not be empty.")
+    k = settings.top_k if top_k is None else top_k
+    if k < 1:
+        raise ValueError("top_k must be at least 1.")
+
+    payload = _read_index()
+    stored_chunks = payload["chunks"]
+    if not stored_chunks:
+        _print_search_results(question, [])
+        return []
+
+    model = payload.get("embedding_model") or settings.embedding_model
+    previous_model = settings.embedding_model
+    settings.embedding_model = model
+    try:
+        query_vectors = _embed_texts([question], for_query=True)
+    finally:
+        settings.embedding_model = previous_model
+    query_vector = query_vectors[0]
+
+    scored: list[tuple[float, dict]] = []
+    for chunk in stored_chunks:
+        embedding = chunk.get("embedding")
+        if not embedding:
+            continue
+        score = _cosine_similarity(query_vector, embedding)
+        scored.append((score, chunk))
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    results = [
+        {
+            "text": chunk["text"],
+            "source": chunk["source"],
+            "chunk_index": chunk["chunk_index"],
+            "heading": chunk.get("heading"),
+            "score": score,
+        }
+        for score, chunk in scored[:k]
+    ]
+    _print_search_results(question, results)
+    return results
 
 
 def build_prompt(question: str, chunks: list[dict]) -> list[dict]:

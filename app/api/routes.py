@@ -8,6 +8,8 @@ from app.models import (
     EmbeddingModelsResponse,
     IngestRequest,
     IngestResponse,
+    SearchRequest,
+    SearchResponse,
 )
 from app.rag import pipeline
 
@@ -37,6 +39,21 @@ def ingest(body: Annotated[IngestRequest | None, Body()] = None) -> IngestRespon
     try:
         embedding_model = body.embedding_model if body else None
         return pipeline.ingest(embedding_model=embedding_model)
+    except NotImplementedError as exc:
+        raise _not_implemented() from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/search", response_model=SearchResponse)
+def search(body: SearchRequest) -> SearchResponse:
+    try:
+        chunks = pipeline.search(body.question, top_k=body.top_k)
+        return SearchResponse(question=body.question, chunks=chunks)
     except NotImplementedError as exc:
         raise _not_implemented() from exc
     except FileNotFoundError as exc:

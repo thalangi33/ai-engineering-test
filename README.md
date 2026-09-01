@@ -1,6 +1,6 @@
 # Ask My Docs
 
-Chat over a local folder of markdown files. This repo is a **scaffold**: the web app and API run, but RAG (load, chunk, embed, retrieve, prompt, LLM) is left as stubs for you to implement.
+Chat over a local folder of markdown files. Load, chunk, ingest, and search are implemented. Prompting and the LLM call are still stubs.
 
 ## Pipeline
 
@@ -16,7 +16,7 @@ question → embed question → search similar chunks ────┘
                          log (chunks used, tokens, latency)
 ```
 
-Stubs live in `app/rag/pipeline.py`. Implement them in the order listed in that file. HTTP routes in `app/api/routes.py` already call `ingest` and `ask` and return **501** until those functions exist.
+Pipeline steps live in `app/rag/pipeline.py`. HTTP routes in `app/api/routes.py` call `ingest`, `search`, and `ask`. Prompting / `ask` still return **501**.
 
 ## Setup
 
@@ -27,7 +27,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-API keys are not required until you implement the LLM call. Do not put secrets in `docs/` — ingested text will be sent to the provider later.
+API keys are required for OpenAI or Gemini embeddings; local MiniLM does not need a key. Do not put secrets in `docs/` — ingested text will be sent to the provider later.
 
 ## Run
 
@@ -37,10 +37,11 @@ python -m app
 
 - UI: http://127.0.0.1:8000
 - Health: `GET /api/health`
-- Ingest: `POST /api/ingest` (501 until you implement it)
-- Ask: `POST /api/ask` with `{"question": "..."}` (501 until you implement it)
+- Ingest: `POST /api/ingest` (optional `{"embedding_model": "..."}`)
+- Search: `POST /api/search` with `{"question": "..."}` (optional `top_k`)
+- Ask: `POST /api/ask` with `{"question": "..."}` (501 until the LLM is wired)
 
-## What you implement later
+## Pipeline status
 
 | Function | Role |
 |---|---|
@@ -48,9 +49,9 @@ python -m app
 | `chunk_text` | Split with metadata (`source`, `chunk_index`) |
 | `ingest` | Embed and persist a local index |
 | `search` | Top-k chunks for a question |
-| `build_prompt` | Answer only from context; otherwise "I don't know" |
-| `ask_llm` | Provider call, temperature 0 |
-| `ask` | Orchestrate search → prompt → LLM → citations from metadata |
+| `build_prompt` | Answer only from context; otherwise "I don't know" (stub) |
+| `ask_llm` | Provider call, temperature 0 (stub) |
+| `ask` | Orchestrate search → prompt → LLM → citations from metadata (stub) |
 
 Sample notes in `docs/` are for ingest once you write loading. Draft eval questions in `evals/questions.json` — fill these in by hand before you trust the pipeline.
 
@@ -60,4 +61,4 @@ Sample notes in `docs/` are for ingest once you write loading. Draft eval questi
 pytest
 ```
 
-Health and stub (501) tests only. Add retrieval/answer evals when you own the pipeline.
+Covers load, chunk, ingest, and search. `/api/ask` still returns 501.
