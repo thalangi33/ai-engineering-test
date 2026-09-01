@@ -10,10 +10,14 @@
     <main>
       <h1>Ask My Docs</h1>
       <p class="lede">
-        Chat over files in <code>docs/</code>. Ingest and ask are stubbed until
-        you implement the RAG pipeline.
+        Chat over files in <code>docs/</code>. Choose an embedding model, ingest,
+        then ask a question.
       </p>
       <div class="toolbar">
+        <label class="model-picker" for="embedding-model">
+          Embedding model
+          <select id="embedding-model"></select>
+        </label>
         <button type="button" class="secondary" id="ingest">Ingest docs</button>
       </div>
       <p class="status" id="status"></p>
@@ -36,6 +40,8 @@
       const form = document.getElementById("ask-form");
       const questionEl = document.getElementById("question");
       const ingestBtn = document.getElementById("ingest");
+      const modelSelect = document.getElementById("embedding-model");
+      const MODEL_STORAGE_KEY = "ask-my-docs.embedding-model";
 
       function setStatus(text, isError = false) {
         statusEl.textContent = text;
@@ -69,11 +75,38 @@
         }
       }
 
+      async function loadEmbeddingModels() {
+        const response = await fetch("/api/embedding-models");
+        if (!response.ok) {
+          throw new Error(await readError(response));
+        }
+        const data = await response.json();
+        modelSelect.replaceChildren();
+        for (const model of data.models) {
+          const option = document.createElement("option");
+          option.value = model.id;
+          option.textContent = model.label;
+          modelSelect.appendChild(option);
+        }
+        const saved = localStorage.getItem(MODEL_STORAGE_KEY);
+        const ids = data.models.map((model) => model.id);
+        modelSelect.value = ids.includes(saved) ? saved : data.selected;
+      }
+
+      modelSelect.addEventListener("change", () => {
+        localStorage.setItem(MODEL_STORAGE_KEY, modelSelect.value);
+      });
+
       ingestBtn.addEventListener("click", async () => {
         ingestBtn.disabled = true;
+        modelSelect.disabled = true;
         setStatus("Ingesting…");
         try {
-          const response = await fetch("/api/ingest", { method: "POST" });
+          const response = await fetch("/api/ingest", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ embedding_model: modelSelect.value }),
+          });
           if (!response.ok) {
             setStatus(await readError(response), true);
             return;
@@ -84,6 +117,7 @@
           setStatus(String(err), true);
         } finally {
           ingestBtn.disabled = false;
+          modelSelect.disabled = false;
         }
       });
 
@@ -112,6 +146,10 @@
         } catch (err) {
           setStatus(String(err), true);
         }
+      });
+
+      loadEmbeddingModels().catch((err) => {
+        setStatus(String(err), true);
       });
     </script>
   </body>

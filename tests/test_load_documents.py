@@ -13,7 +13,13 @@ def test_load_sample_docs() -> None:
     assert "docs/what-ask-my-docs-is.md" in by_path
     assert "docs/folder-conventions.md" in by_path
     assert "docs/build-order.md" in by_path
+    assert "docs/nba/lebron-james.md" in by_path
+    assert "docs/nba/stephen-curry.md" in by_path
+    assert "docs/nba/nikola-jokic.md" in by_path
     assert "Ask My Docs is a small app" in by_path["docs/what-ask-my-docs-is.md"]
+    assert "all-time leading scorer" in by_path["docs/nba/lebron-james.md"]
+    assert "unanimous MVP" in by_path["docs/nba/stephen-curry.md"]
+    assert "Sombor, Serbia" in by_path["docs/nba/nikola-jokic.md"]
 
 
 def test_load_skips_unsupported_files_and_reads_nested(tmp_path: Path) -> None:

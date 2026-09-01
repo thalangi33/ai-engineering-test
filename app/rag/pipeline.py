@@ -22,7 +22,7 @@ from typing import NoReturn
 import httpx
 
 from app.config import PROJECT_ROOT, settings
-from app.models import AskResponse, IngestResponse
+from app.models import EmbeddingModelsResponse, AskResponse, IngestResponse
 
 _ALLOWED_SUFFIXES = {".md", ".txt"}
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -37,6 +37,11 @@ _OPENAI_EMBED_MODELS = {"text-embedding-3-small"}
 _GEMINI_EMBED_MODELS = {"gemini-embedding-001"}
 _LOCAL_EMBED_MODELS = {"all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2"}
 _MINILM_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
+_EMBEDDING_MODEL_CHOICES = (
+    ("text-embedding-3-small", "OpenAI · text-embedding-3-small"),
+    ("gemini-embedding-001", "Gemini · gemini-embedding-001"),
+    ("all-MiniLM-L6-v2", "Local · all-MiniLM-L6-v2"),
+)
 
 _minilm_model = None
 
@@ -196,6 +201,19 @@ def _embedding_backend(model: str) -> str:
     )
 
 
+def list_embedding_models() -> EmbeddingModelsResponse:
+    selected = settings.embedding_model
+    if selected in _LOCAL_EMBED_MODELS:
+        selected = "all-MiniLM-L6-v2"
+    return EmbeddingModelsResponse(
+        models=[
+            {"id": model_id, "label": label}
+            for model_id, label in _EMBEDDING_MODEL_CHOICES
+        ],
+        selected=selected,
+    )
+
+
 def _raise_embed_http_error(exc: httpx.HTTPError) -> NoReturn:
     if isinstance(exc, httpx.HTTPStatusError):
         detail = exc.response.text.strip() or exc.response.reason_phrase
@@ -321,8 +339,13 @@ def _embed_texts(
     return _embed_local(texts)
 
 
-def ingest() -> IngestResponse:
+def ingest(embedding_model: str | None = None) -> IngestResponse:
     """Load, chunk, embed, and persist the vector index."""
+    if embedding_model is not None:
+        embedding_model = embedding_model.strip()
+        if embedding_model:
+            _embedding_backend(embedding_model)
+            settings.embedding_model = embedding_model
     documents = load_documents(settings.docs_dir)
     chunks = chunk_text(documents)
     embeddings = _embed_texts([chunk["text"] for chunk in chunks])
@@ -345,12 +368,14 @@ def ingest() -> IngestResponse:
     return IngestResponse(
         status="ok",
         message=(
-            f"Ingested {len(documents)} documents into {len(stored)} chunks."
+            f"Ingested {len(documents)} documents into {len(stored)} chunks "
+            f"with {settings.embedding_model}."
             if stored
             else "No chunks to ingest."
         ),
         document_count=len(documents),
         chunk_count=len(stored),
+        embedding_model=settings.embedding_model,
     )
 
 

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,21 @@ def test_index_serves_chat_page() -> None:
     response = client.get("/")
     assert response.status_code == 200
     assert "Ask My Docs" in response.text
+    assert 'id="embedding-model"' in response.text
+
+
+def test_embedding_models_lists_options() -> None:
+    response = client.get("/api/embedding-models")
+    assert response.status_code == 200
+    body = response.json()
+    ids = [model["id"] for model in body["models"]]
+    assert ids == [
+        "text-embedding-3-small",
+        "gemini-embedding-001",
+        "all-MiniLM-L6-v2",
+    ]
+    assert body["selected"] in ids
+    assert all(model["label"] for model in body["models"])
 
 
 def test_ingest_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -34,9 +50,30 @@ def test_ingest_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["document_count"] == 3
+    assert body["document_count"] == 6
     assert body["chunk_count"] >= 1
     assert (tmp_path / "index.json").is_file()
+
+
+def test_ingest_accepts_embedding_model_in_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "index_path", tmp_path / "index.json")
+    monkeypatch.setattr(settings, "embedding_model", "text-embedding-3-small")
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts: [[1.0, 0.0] for _ in texts],
+    )
+
+    response = client.post(
+        "/api/ingest", json={"embedding_model": "gemini-embedding-001"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["embedding_model"] == "gemini-embedding-001"
+    stored = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
+    assert stored["embedding_model"] == "gemini-embedding-001"
 
 
 def test_ingest_reports_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:

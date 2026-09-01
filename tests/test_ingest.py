@@ -21,7 +21,7 @@ def test_ingest_sample_docs_writes_index(tmp_path: Path, monkeypatch: pytest.Mon
     expected_chunks = chunk_text(load_documents(settings.docs_dir))
 
     assert result.status == "ok"
-    assert result.document_count == 3
+    assert result.document_count == 6
     assert result.chunk_count == len(expected_chunks)
     assert result.chunk_count
     assert "chunks" in (result.message or "")
@@ -33,6 +33,9 @@ def test_ingest_sample_docs_writes_index(tmp_path: Path, monkeypatch: pytest.Mon
     assert "docs/what-ask-my-docs-is.md" in sources
     assert "docs/folder-conventions.md" in sources
     assert "docs/build-order.md" in sources
+    assert "docs/nba/lebron-james.md" in sources
+    assert "docs/nba/stephen-curry.md" in sources
+    assert "docs/nba/nikola-jokic.md" in sources
     for stored, original in zip(payload["chunks"], expected_chunks, strict=True):
         assert stored["text"] == original["text"]
         assert stored["source"] == original["source"]
@@ -87,6 +90,25 @@ def test_ingest_missing_docs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(settings, "index_path", tmp_path / "index.json")
     with pytest.raises(FileNotFoundError):
         ingest()
+
+
+def test_ingest_uses_requested_embedding_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "note.md").write_text("# Hello\n\nShort note.", encoding="utf-8")
+    index_path = tmp_path / "index.json"
+    monkeypatch.setattr(settings, "docs_dir", docs_dir)
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "embedding_model", "text-embedding-3-small")
+    monkeypatch.setattr(pipeline, "_embed_texts", _fake_embed)
+
+    result = ingest(embedding_model="all-MiniLM-L6-v2")
+
+    assert result.embedding_model == "all-MiniLM-L6-v2"
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    assert payload["embedding_model"] == "all-MiniLM-L6-v2"
 
 
 def test_embed_texts_empty_returns_empty() -> None:

@@ -9,6 +9,9 @@ def test_sample_docs_keep_source_and_index() -> None:
     assert "docs/what-ask-my-docs-is.md" in sources
     assert "docs/folder-conventions.md" in sources
     assert "docs/build-order.md" in sources
+    assert "docs/nba/lebron-james.md" in sources
+    assert "docs/nba/stephen-curry.md" in sources
+    assert "docs/nba/nikola-jokic.md" in sources
     for chunk in chunks:
         assert chunk["text"].strip()
         assert isinstance(chunk["chunk_index"], int)

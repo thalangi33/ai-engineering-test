@@ -1,6 +1,14 @@
-from fastapi import APIRouter, HTTPException
+from typing import Annotated
 
-from app.models import AskRequest, AskResponse, IngestResponse
+from fastapi import APIRouter, Body, HTTPException
+
+from app.models import (
+    AskRequest,
+    AskResponse,
+    EmbeddingModelsResponse,
+    IngestRequest,
+    IngestResponse,
+)
 from app.rag import pipeline
 
 router = APIRouter()
@@ -19,10 +27,16 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@router.get("/embedding-models", response_model=EmbeddingModelsResponse)
+def embedding_models() -> EmbeddingModelsResponse:
+    return pipeline.list_embedding_models()
+
+
 @router.post("/ingest", response_model=IngestResponse)
-def ingest() -> IngestResponse:
+def ingest(body: Annotated[IngestRequest | None, Body()] = None) -> IngestResponse:
     try:
-        return pipeline.ingest()
+        embedding_model = body.embedding_model if body else None
+        return pipeline.ingest(embedding_model=embedding_model)
     except NotImplementedError as exc:
         raise _not_implemented() from exc
     except FileNotFoundError as exc:
