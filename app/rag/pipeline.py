@@ -1,29 +1,28 @@
-"""RAG pipeline stubs.
-
-Implement these yourself, in this order:
+"""RAG pipeline.
 
 1. load_documents  — read text from settings.docs_dir (done)
 2. chunk_text      — split documents into overlapping chunks with metadata (done)
 3. ingest          — embed chunks and store them locally (done)
 4. search          — embed the question, return top_k chunks (done)
-5. build_prompt    — system instructions + retrieved context + question
-6. ask_llm         — call the provider; temperature 0
-7. ask             — search → prompt → LLM → citations from chunk metadata
+5. build_prompt    — system instructions + retrieved context + question (done)
+6. ask_llm         — call the provider; temperature 0 (done)
+7. ask             — search → prompt → LLM → citations from chunk metadata (done)
 
-Do not skip search debugging: print retrieved chunks before wiring the LLM.
-Citations must come from retrieved chunk metadata, not from the model inventing filenames.
+Search still prints retrieved chunks so retrieval can be checked before trusting answers.
+Citations come from retrieved chunk metadata, not from the model inventing filenames.
 """
 
 import json
 import math
 import re
+import time
 from pathlib import Path
 from typing import NoReturn
 
 import httpx
 
 from app.config import PROJECT_ROOT, settings
-from app.models import EmbeddingModelsResponse, AskResponse, IngestResponse
+from app.models import Citation, EmbeddingModelsResponse, AskResponse, IngestResponse
 
 _ALLOWED_SUFFIXES = {".md", ".txt"}
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -32,6 +31,14 @@ _TARGET_CHARS = 2000
 _MAX_CHARS = 3200
 _OVERLAP_CHARS = 320
 _OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
+_OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
+_SYSTEM_PROMPT = (
+    "You are Ask My Docs. Answer using only the document excerpts in the user "
+    "message. If they do not contain the answer, reply with exactly: I don't know. "
+    "Do not use outside knowledge. Do not invent filenames, sources, or facts."
+)
+_REFUSE_RE = re.compile(r"^\s*i (don't|do not) know\.?\s*$", re.IGNORECASE)
+_SNIPPET_CHARS = 240
 _OPENAI_EMBED_BATCH_SIZE = 64
 _GEMINI_EMBED_BATCH_SIZE = 100
 _OPENAI_EMBED_MODELS = {"text-embedding-3-small"}
@@ -264,13 +271,17 @@ def list_embedding_models() -> EmbeddingModelsResponse:
     )
 
 
-def _raise_embed_http_error(exc: httpx.HTTPError) -> NoReturn:
+def _raise_http_error(exc: httpx.HTTPError, what: str) -> NoReturn:
     if isinstance(exc, httpx.HTTPStatusError):
         detail = exc.response.text.strip() or exc.response.reason_phrase
         raise RuntimeError(
-            f"Embedding request failed ({exc.response.status_code}): {detail}"
+            f"{what} failed ({exc.response.status_code}): {detail}"
         ) from exc
-    raise RuntimeError(f"Embedding request failed: {exc}") from exc
+    raise RuntimeError(f"{what} failed: {exc}") from exc
+
+
+def _raise_embed_http_error(exc: httpx.HTTPError) -> NoReturn:
+    _raise_http_error(exc, "Embedding request")
 
 
 def _embed_openai(texts: list[str]) -> list[list[float]]:
@@ -484,14 +495,131 @@ def search(question: str, top_k: int | None = None) -> list[dict]:
 
 def build_prompt(question: str, chunks: list[dict]) -> list[dict]:
     """Return chat messages. Answer only from context; otherwise say you don't know."""
-    raise NotImplementedError("Implement prompt assembly.")
+    question = (question or "").strip()
+    parts = ["Question:", question or "(empty)", "", "Document excerpts:"]
+    if not chunks:
+        parts.append("(none)")
+    else:
+        for index, chunk in enumerate(chunks, start=1):
+            source = chunk.get("source") or "unknown"
+            heading = chunk.get("heading")
+            header = f"[{index}] {source}"
+            if heading:
+                header += f" — {heading}"
+            parts.append(header)
+            parts.append((chunk.get("text") or "").strip())
+            parts.append("")
+    return [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": "\n".join(parts).strip()},
+    ]
+
+
+def _citation_snippet(text: str) -> str | None:
+    snippet = " ".join((text or "").split())
+    if not snippet:
+        return None
+    if len(snippet) > _SNIPPET_CHARS:
+        return snippet[: _SNIPPET_CHARS - 3] + "..."
+    return snippet
+
+
+def _citations_from_chunks(chunks: list[dict]) -> list[Citation]:
+    citations: list[Citation] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        source = chunk.get("source")
+        if not source or source in seen:
+            continue
+        seen.add(source)
+        citations.append(
+            Citation(source=source, snippet=_citation_snippet(chunk.get("text") or ""))
+        )
+    return citations
+
+
+def _looks_like_refuse(answer: str) -> bool:
+    return bool(_REFUSE_RE.match(answer or ""))
+
+
+def _print_ask_result(
+    question: str,
+    answer: str,
+    citations: list[Citation],
+    elapsed_ms: float,
+    usage: dict | None = None,
+) -> None:
+    sources = ", ".join(citation.source for citation in citations) or "(none)"
+    usage_part = ""
+    if usage:
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        if prompt_tokens is not None and completion_tokens is not None:
+            usage_part = f" tokens={prompt_tokens}+{completion_tokens}"
+    print(
+        f"[ask] {question!r} → {elapsed_ms:.0f}ms{usage_part}\n"
+        f"  citations: {sources}\n"
+        f"  answer: {answer}"
+    )
 
 
 def ask_llm(messages: list[dict]) -> str:
     """Send messages to the LLM and return the assistant text."""
-    raise NotImplementedError("Implement the LLM call.")
+    return _ask_llm(messages)[0]
+
+
+def _ask_llm(messages: list[dict]) -> tuple[str, dict | None]:
+    api_key = (settings.llm_api_key or "").strip()
+    if not api_key:
+        raise ValueError("LLM_API_KEY is required to ask the model.")
+    if not messages:
+        raise ValueError("messages must not be empty.")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": settings.llm_model,
+        "temperature": settings.temperature,
+        "messages": messages,
+    }
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            response = client.post(_OPENAI_CHAT_URL, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as exc:
+        _raise_http_error(exc, "LLM request")
+
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("LLM response was missing choices.")
+    message = choices[0].get("message") or {}
+    content = (message.get("content") or "").strip()
+    if not content:
+        raise RuntimeError("LLM response was missing text.")
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+    return content, usage
 
 
 def ask(question: str) -> AskResponse:
     """Retrieve, prompt, call the LLM, and attach citations from chunk metadata."""
-    raise NotImplementedError("Implement ask orchestration.")
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("Question must not be empty.")
+
+    started = time.perf_counter()
+    chunks = search(question)
+    if not chunks:
+        answer = "I don't know"
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        _print_ask_result(question, answer, [], elapsed_ms)
+        return AskResponse(answer=answer, citations=[])
+
+    messages = build_prompt(question, chunks)
+    answer, usage = _ask_llm(messages)
+    citations = [] if _looks_like_refuse(answer) else _citations_from_chunks(chunks)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    _print_ask_result(question, answer, citations, elapsed_ms, usage)
+    return AskResponse(answer=answer, citations=citations)

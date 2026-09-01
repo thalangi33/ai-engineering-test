@@ -1,6 +1,6 @@
 # Ask My Docs
 
-Chat over a local folder of markdown files. Load, chunk, ingest, and search are implemented. Prompting and the LLM call are still stubs.
+Chat over a local folder of markdown files. Load, chunk, ingest, search, and ask are implemented.
 
 ## Pipeline
 
@@ -16,7 +16,7 @@ question → embed question → search similar chunks ────┘
                          log (chunks used, tokens, latency)
 ```
 
-Pipeline steps live in `app/rag/pipeline.py`. HTTP routes in `app/api/routes.py` call `ingest`, `search`, and `ask`. Prompting / `ask` still return **501**.
+Pipeline steps live in `app/rag/pipeline.py`. HTTP routes in `app/api/routes.py` call `ingest`, `search`, and `ask`.
 
 ## Setup
 
@@ -27,7 +27,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-API keys are required for OpenAI or Gemini embeddings; local MiniLM does not need a key. Do not put secrets in `docs/` — ingested text will be sent to the provider later.
+API keys are required for OpenAI chat (`LLM_API_KEY`) and for OpenAI or Gemini embeddings. Local MiniLM does not need a key. Do not put secrets in `docs/` — ingested text is sent to the LLM provider when you ask.
 
 ## Run
 
@@ -39,7 +39,7 @@ python -m app
 - Health: `GET /api/health`
 - Ingest: `POST /api/ingest` (optional `{"embedding_model": "..."}`)
 - Search: `POST /api/search` with `{"question": "..."}` (optional `top_k`)
-- Ask: `POST /api/ask` with `{"question": "..."}` (501 until the LLM is wired)
+- Ask: `POST /api/ask` with `{"question": "..."}` (requires `LLM_API_KEY`)
 
 ## Pipeline status
 
@@ -49,11 +49,11 @@ python -m app
 | `chunk_text` | Split with metadata (`source`, `chunk_index`) |
 | `ingest` | Embed and persist a local index |
 | `search` | Top-k chunks for a question |
-| `build_prompt` | Answer only from context; otherwise "I don't know" (stub) |
-| `ask_llm` | Provider call, temperature 0 (stub) |
-| `ask` | Orchestrate search → prompt → LLM → citations from metadata (stub) |
+| `build_prompt` | Answer only from context; otherwise "I don't know" |
+| `ask_llm` | OpenAI chat completions, temperature 0 |
+| `ask` | Search → prompt → LLM → citations from chunk metadata |
 
-Sample notes in `docs/` are for ingest once you write loading. Draft eval questions in `evals/questions.json` — fill these in by hand before you trust the pipeline.
+Sample notes in `docs/` are ingested into the local index. Draft eval questions in `evals/questions.json` — fill these in by hand before you trust the pipeline.
 
 ## Tests
 
@@ -61,4 +61,4 @@ Sample notes in `docs/` are for ingest once you write loading. Draft eval questi
 pytest
 ```
 
-Covers load, chunk, ingest, and search. `/api/ask` still returns 501.
+Covers load, chunk, ingest, search, prompt, and ask. LLM HTTP calls are mocked.
