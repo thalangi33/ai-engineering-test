@@ -59,7 +59,7 @@ h1 {
 }
 
 .model-picker select {
-  min-width: 16rem;
+  min-width: 14rem;
   padding: 0.55rem 0.7rem;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -165,9 +165,14 @@ textarea {
 }
 
 .citations {
-  margin-top: 0.6rem;
+  margin: 0.6rem 0 0;
+  padding-left: 1.1rem;
   font-size: 0.85rem;
   color: var(--muted);
+}
+
+.citations li {
+  margin: 0.15rem 0;
 }
 
 .chunk {

@@ -10,7 +10,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
     title="Ask My Docs",
-    description="Chat over a local folder of documents. RAG logic is intentionally stubbed.",
+    description="Chat over a local folder of documents.",
     version="0.1.0",
 )
 app.include_router(router, prefix="/api")

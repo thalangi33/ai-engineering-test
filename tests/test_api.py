@@ -22,7 +22,9 @@ def test_index_serves_chat_page() -> None:
     assert response.status_code == 200
     assert "Ask My Docs" in response.text
     assert 'id="embedding-model"' in response.text
-    assert "/api/search" in response.text
+    assert 'id="chat-model"' in response.text
+    assert "/api/ask" in response.text
+    assert ">Ask</button>" in response.text
 
 
 def test_embedding_models_lists_options() -> None:
@@ -34,6 +36,20 @@ def test_embedding_models_lists_options() -> None:
         "text-embedding-3-small",
         "gemini-embedding-001",
         "all-MiniLM-L6-v2",
+    ]
+    assert body["selected"] in ids
+    assert all(model["label"] for model in body["models"])
+
+
+def test_chat_models_lists_options() -> None:
+    response = client.get("/api/chat-models")
+    assert response.status_code == 200
+    body = response.json()
+    ids = [model["id"] for model in body["models"]]
+    assert ids == [
+        "gemini-2.0-flash",
+        "llama3.2",
+        "llama-3.1-8b-instant",
     ]
     assert body["selected"] in ids
     assert all(model["label"] for model in body["models"])
@@ -225,10 +241,103 @@ def test_search_rejects_empty_question() -> None:
     assert response.status_code == 422
 
 
-def test_ask_is_stubbed() -> None:
+def test_ask_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    index_path = tmp_path / "index.json"
+    index_path.write_text(
+        json.dumps(
+            {
+                "embedding_model": "text-embedding-3-small",
+                "chunks": [
+                    {
+                        "text": "Ask My Docs answers from local documents.",
+                        "source": "docs/what-ask-my-docs-is.md",
+                        "chunk_index": 0,
+                        "heading": "What Ask My Docs is",
+                        "embedding": [1.0, 0.0],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0]],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_ask_llm",
+        lambda messages: ("It answers from local documents.", None),
+    )
+
+    response = client.post(
+        "/api/ask",
+        json={"question": "What is Ask My Docs?", "llm_model": "llama3.2"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == "It answers from local documents."
+    assert body["llm_model"] == "llama3.2"
+    assert body["citations"][0]["source"] == "docs/what-ask-my-docs-is.md"
+    assert "Ask My Docs answers from local documents." in body["citations"][0]["snippet"]
+
+
+def test_ask_reports_missing_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    index_path.write_text(
+        json.dumps(
+            {
+                "embedding_model": "all-MiniLM-L6-v2",
+                "chunks": [
+                    {
+                        "text": "Notes live in docs.",
+                        "source": "docs/folder-conventions.md",
+                        "chunk_index": 0,
+                        "heading": None,
+                        "embedding": [1.0, 0.0],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "gemini_api_key", "")
+    monkeypatch.setattr(settings, "llm_model", "gemini-2.0-flash")
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0]],
+    )
+
+    response = client.post("/api/ask", json={"question": "Where do notes go?"})
+    assert response.status_code == 400
+    assert "gemini_api_key" in response.json()["detail"].lower()
+
+
+def test_ask_rejects_unknown_chat_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "index_path", tmp_path / "index.json")
+    response = client.post(
+        "/api/ask",
+        json={"question": "What is Ask My Docs?", "llm_model": "gpt-4o-mini"},
+    )
+    assert response.status_code == 400
+    assert "unsupported chat model" in response.json()["detail"].lower()
+
+
+def test_ask_missing_index_returns_400(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "index_path", tmp_path / "missing.json")
     response = client.post("/api/ask", json={"question": "What is Ask My Docs?"})
-    assert response.status_code == 501
-    assert "not implemented" in response.json()["detail"].lower()
+    assert response.status_code == 400
+    assert "ingest" in response.json()["detail"].lower()
 
 
 def test_ask_rejects_empty_question() -> None:

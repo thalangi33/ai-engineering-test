@@ -11,13 +11,17 @@
       <h1>Ask My Docs</h1>
       <p class="lede">
         Chat over files in <code>docs/</code>. Choose an embedding model, ingest,
-        then search. Retrieved chunks are shown so you can check ranking before
-        the LLM is wired.
+        pick a chat model, then ask. Answers come from retrieved chunks, with
+        source filenames.
       </p>
       <div class="toolbar">
         <label class="model-picker" for="embedding-model">
           Embedding model
           <select id="embedding-model"></select>
+        </label>
+        <label class="model-picker" for="chat-model">
+          Chat model
+          <select id="chat-model"></select>
         </label>
         <button type="button" class="secondary" id="ingest">Ingest docs</button>
       </div>
@@ -29,10 +33,10 @@
         <textarea
           id="question"
           rows="1"
-          placeholder="Search your docs (retrieval only)"
+          placeholder="Ask a question about your docs"
           required
         ></textarea>
-        <button type="submit">Search</button>
+        <button type="submit">Ask</button>
       </div>
     </form>
     <script>
@@ -42,7 +46,9 @@
       const questionEl = document.getElementById("question");
       const ingestBtn = document.getElementById("ingest");
       const modelSelect = document.getElementById("embedding-model");
+      const chatSelect = document.getElementById("chat-model");
       const MODEL_STORAGE_KEY = "ask-my-docs.embedding-model";
+      const CHAT_STORAGE_KEY = "ask-my-docs.chat-model";
 
       function setStatus(text, isError = false) {
         statusEl.textContent = text;
@@ -61,33 +67,23 @@
         wrap.scrollIntoView({ behavior: "smooth", block: "end" });
       }
 
-      function addChunks(chunks) {
+      function addAnswer(answer, citations) {
         const wrap = document.createElement("div");
         wrap.className = "msg bot";
         const label = document.createElement("span");
         label.className = "label";
-        label.textContent = "Retrieved";
+        label.textContent = "Docs";
         wrap.appendChild(label);
-        if (!chunks.length) {
-          wrap.appendChild(
-            document.createTextNode("No matching chunks. Ingest docs and try again.")
-          );
-        } else {
-          chunks.forEach((chunk, index) => {
-            const item = document.createElement("div");
-            item.className = "chunk";
-            const meta = document.createElement("div");
-            meta.className = "chunk-meta";
-            const score = Number(chunk.score).toFixed(3);
-            const heading = chunk.heading ? ` · ${chunk.heading}` : "";
-            meta.textContent = `${index + 1}. ${chunk.source}${heading} (${score})`;
-            item.appendChild(meta);
-            const body = document.createElement("div");
-            body.className = "chunk-text";
-            body.textContent = chunk.text;
-            item.appendChild(body);
-            wrap.appendChild(item);
+        wrap.appendChild(document.createTextNode(answer));
+        if (citations && citations.length) {
+          const list = document.createElement("ul");
+          list.className = "citations";
+          citations.forEach((citation) => {
+            const item = document.createElement("li");
+            item.textContent = citation.source;
+            list.appendChild(item);
           });
+          wrap.appendChild(list);
         }
         log.appendChild(wrap);
         wrap.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -102,31 +98,43 @@
         }
       }
 
-      async function loadEmbeddingModels() {
-        const response = await fetch("/api/embedding-models");
+      async function fillModelSelect(select, endpoint, storageKey) {
+        const response = await fetch(endpoint);
         if (!response.ok) {
           throw new Error(await readError(response));
         }
         const data = await response.json();
-        modelSelect.replaceChildren();
+        select.replaceChildren();
         for (const model of data.models) {
           const option = document.createElement("option");
           option.value = model.id;
           option.textContent = model.label;
-          modelSelect.appendChild(option);
+          select.appendChild(option);
         }
-        const saved = localStorage.getItem(MODEL_STORAGE_KEY);
+        const saved = localStorage.getItem(storageKey);
         const ids = data.models.map((model) => model.id);
-        modelSelect.value = ids.includes(saved) ? saved : data.selected;
+        select.value = ids.includes(saved) ? saved : data.selected;
+      }
+
+      async function loadModels() {
+        await Promise.all([
+          fillModelSelect(modelSelect, "/api/embedding-models", MODEL_STORAGE_KEY),
+          fillModelSelect(chatSelect, "/api/chat-models", CHAT_STORAGE_KEY),
+        ]);
       }
 
       modelSelect.addEventListener("change", () => {
         localStorage.setItem(MODEL_STORAGE_KEY, modelSelect.value);
       });
 
+      chatSelect.addEventListener("change", () => {
+        localStorage.setItem(CHAT_STORAGE_KEY, chatSelect.value);
+      });
+
       ingestBtn.addEventListener("click", async () => {
         ingestBtn.disabled = true;
         modelSelect.disabled = true;
+        chatSelect.disabled = true;
         setStatus("Ingesting…");
         try {
           const response = await fetch("/api/ingest", {
@@ -145,6 +153,7 @@
         } finally {
           ingestBtn.disabled = false;
           modelSelect.disabled = false;
+          chatSelect.disabled = false;
         }
       });
 
@@ -152,14 +161,20 @@
         event.preventDefault();
         const question = questionEl.value.trim();
         if (!question) return;
+        const submitBtn = form.querySelector('button[type="submit"]');
         addMessage("user", question);
         questionEl.value = "";
-        setStatus("Searching…");
+        setStatus("Asking…");
+        if (submitBtn) submitBtn.disabled = true;
+        chatSelect.disabled = true;
         try {
-          const response = await fetch("/api/search", {
+          const response = await fetch("/api/ask", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ question }),
+            body: JSON.stringify({
+              question,
+              llm_model: chatSelect.value,
+            }),
           });
           if (!response.ok) {
             const detail = await readError(response);
@@ -168,17 +183,24 @@
             return;
           }
           const data = await response.json();
-          addChunks(data.chunks || []);
-          const count = (data.chunks || []).length;
+          addAnswer(data.answer || "", data.citations || []);
+          const count = (data.citations || []).length;
           setStatus(
-            count === 1 ? "Retrieved 1 chunk." : `Retrieved ${count} chunks.`
+            count === 0
+              ? "Answered."
+              : count === 1
+                ? "Answered with 1 source."
+                : `Answered with ${count} sources.`
           );
         } catch (err) {
           setStatus(String(err), true);
+        } finally {
+          if (submitBtn) submitBtn.disabled = false;
+          chatSelect.disabled = false;
         }
       });
 
-      loadEmbeddingModels().catch((err) => {
+      loadModels().catch((err) => {
         setStatus(String(err), true);
       });
     </script>
