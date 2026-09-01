@@ -40,10 +40,26 @@ def test_ingest_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_ingest_reports_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "embedding_model", "text-embedding-3-small")
     monkeypatch.setattr(settings, "llm_api_key", "  ")
     response = client.post("/api/ingest")
     assert response.status_code == 400
     assert "llm_api_key" in response.json()["detail"].lower()
+
+
+def test_ingest_reports_missing_gemini_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "embedding_model", "gemini-embedding-001")
+    monkeypatch.setattr(settings, "gemini_api_key", "")
+    response = client.post("/api/ingest")
+    assert response.status_code == 400
+    assert "gemini_api_key" in response.json()["detail"].lower()
+
+
+def test_ingest_reports_unknown_embedding_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "embedding_model", "not-a-real-model")
+    response = client.post("/api/ingest")
+    assert response.status_code == 400
+    assert "unsupported embedding model" in response.json()["detail"].lower()
 
 
 def test_ingest_missing_docs_returns_400(
