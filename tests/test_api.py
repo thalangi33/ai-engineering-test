@@ -99,6 +99,24 @@ def test_ingest_reports_unknown_embedding_model(monkeypatch: pytest.MonkeyPatch)
     assert "unsupported embedding model" in response.json()["detail"].lower()
 
 
+def test_ingest_reports_embed_runtime_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom(texts: list[str]) -> list[list[float]]:
+        raise RuntimeError(
+            "sentence-transformers is required for all-MiniLM-L6-v2. "
+            "Install it with: pip install sentence-transformers"
+        )
+
+    monkeypatch.setattr(settings, "index_path", tmp_path / "index.json")
+    monkeypatch.setattr(pipeline, "_embed_texts", _boom)
+    response = client.post(
+        "/api/ingest", json={"embedding_model": "all-MiniLM-L6-v2"}
+    )
+    assert response.status_code == 400
+    assert "sentence-transformers" in response.json()["detail"].lower()
+
+
 def test_ingest_missing_docs_returns_400(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

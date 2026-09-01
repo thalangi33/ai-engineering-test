@@ -43,6 +43,8 @@ def ingest(body: Annotated[IngestRequest | None, Body()] = None) -> IngestRespon
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/ask", response_model=AskResponse)

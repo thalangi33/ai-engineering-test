@@ -341,14 +341,20 @@ def _embed_texts(
 
 def ingest(embedding_model: str | None = None) -> IngestResponse:
     """Load, chunk, embed, and persist the vector index."""
+    model = settings.embedding_model
     if embedding_model is not None:
         embedding_model = embedding_model.strip()
         if embedding_model:
             _embedding_backend(embedding_model)
-            settings.embedding_model = embedding_model
+            model = embedding_model
     documents = load_documents(settings.docs_dir)
     chunks = chunk_text(documents)
-    embeddings = _embed_texts([chunk["text"] for chunk in chunks])
+    previous_model = settings.embedding_model
+    settings.embedding_model = model
+    try:
+        embeddings = _embed_texts([chunk["text"] for chunk in chunks])
+    finally:
+        settings.embedding_model = previous_model
     stored = [
         {
             "text": chunk["text"],
@@ -361,7 +367,7 @@ def ingest(embedding_model: str | None = None) -> IngestResponse:
     ]
     _write_index(
         {
-            "embedding_model": settings.embedding_model,
+            "embedding_model": model,
             "chunks": stored,
         }
     )
@@ -369,13 +375,13 @@ def ingest(embedding_model: str | None = None) -> IngestResponse:
         status="ok",
         message=(
             f"Ingested {len(documents)} documents into {len(stored)} chunks "
-            f"with {settings.embedding_model}."
+            f"with {model}."
             if stored
             else "No chunks to ingest."
         ),
         document_count=len(documents),
         chunk_count=len(stored),
-        embedding_model=settings.embedding_model,
+        embedding_model=model,
     )
 
 
