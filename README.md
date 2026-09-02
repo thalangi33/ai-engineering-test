@@ -1,6 +1,6 @@
 # Ask My Docs
 
-Chat over a local folder of markdown files. Load, chunk, ingest, search, and ask are implemented.
+Chat over a local folder of markdown files. Load, chunk, ingest, search, ask, and evals are implemented.
 
 ## Pipeline
 
@@ -42,6 +42,20 @@ python -m app
 - Ask: `POST /api/ask` with `{"question": "..."}` (optional `llm_model`)
 - Chat models: `GET /api/chat-models`
 
+## Evals
+
+Score `evals/questions.json`. Retrieval (expected source in top-k) is scored separately from answer quality. Fluent-but-wrong answers fail if they miss a `must_contain` phrase. Refuse cases must say `I don't know` with no citations.
+
+```bash
+# Retrieval only (no chat API key). MiniLM embeds locally.
+python -m evals --ingest --embedding-model all-MiniLM-L6-v2 --retrieval-only
+
+# Full suite (needs a configured chat model in .env)
+python -m evals --ingest --embedding-model all-MiniLM-L6-v2
+```
+
+Exit code 1 if any scored check fails. `--json` prints machine-readable results.
+
 ## Pipeline status
 
 | Function | Role |
@@ -53,8 +67,9 @@ python -m app
 | `build_prompt` | Answer only from context; otherwise "I don't know" |
 | `ask_llm` | Gemini, Ollama llama3.2, or Groq; temperature 0 |
 | `ask` | Search → prompt → LLM → citations from chunk metadata |
+| `python -m evals` | Score retrieval vs answer on `evals/questions.json` |
 
-Sample notes in `docs/` are ingested into the local index. Draft eval questions in `evals/questions.json` — fill these in by hand before you trust the pipeline.
+Sample notes in `docs/` are ingested into the local index. Hand-written eval questions live in `evals/questions.json`.
 
 ## Tests
 
@@ -62,4 +77,4 @@ Sample notes in `docs/` are ingested into the local index. Draft eval questions 
 pytest
 ```
 
-Covers load, chunk, ingest, search, prompt, and ask. LLM HTTP calls are mocked.
+Covers load, chunk, ingest, search, prompt, ask, and eval scoring. LLM HTTP calls are mocked.

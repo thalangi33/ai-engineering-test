@@ -1,40 +1,45 @@
 {
-  "description": "Hand-write these. Score retrieval (right chunk in top_k) separately from answer quality. Fluent-but-wrong is a fail.",
+  "description": "Hand-write these. Score retrieval (right chunk in top_k) separately from answer quality. Fluent-but-wrong is a fail: the answer must include every must_contain phrase. Refuse cases must say I don't know and attach no citations.",
   "questions": [
     {
       "id": "easy-1",
       "question": "What is Ask My Docs?",
       "expected_source": "docs/what-ask-my-docs-is.md",
       "notes": "Should mention answering from local documents with citations.",
-      "should_refuse": false
+      "should_refuse": false,
+      "must_contain": ["local folder", "document"]
     },
     {
       "id": "easy-2",
       "question": "Where should I put notes to query?",
       "expected_source": "docs/folder-conventions.md",
       "notes": "The docs/ folder. Markdown or txt.",
-      "should_refuse": false
+      "should_refuse": false,
+      "must_contain": ["docs", "markdown"]
     },
     {
       "id": "easy-3",
       "question": "What should I do before calling the LLM when debugging retrieval?",
       "expected_source": "docs/build-order.md",
       "notes": "Print the top chunks; do not call the LLM until retrieval looks right.",
-      "should_refuse": false
+      "should_refuse": false,
+      "must_contain": ["chunk", "retrieval"]
     },
     {
       "id": "paraphrase-1",
       "question": "If I change a markdown file, do I need to do anything special?",
       "expected_source": "docs/folder-conventions.md",
       "notes": "Re-ingest; stale index is expected in v1.",
-      "should_refuse": false
+      "should_refuse": false,
+      "must_contain": ["ingest"]
     },
     {
       "id": "refuse-1",
       "question": "What is the weather in Tokyo tomorrow?",
       "expected_source": null,
       "notes": "Not in the docs. Must refuse / say I don't know. No fake citations.",
-      "should_refuse": true
+      "should_refuse": true,
+      "must_contain": []
     }
   ]
 }
