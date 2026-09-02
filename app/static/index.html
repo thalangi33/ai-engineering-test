@@ -11,12 +11,17 @@
       <h1>Ask My Docs</h1>
       <p class="lede">
         Chat over files in <code>docs/</code>. Choose an embedding model, ingest,
-        then ask. Answers come from retrieved chunks, with source filenames.
+        pick a chat model, then ask. Answers come from retrieved chunks, with
+        source filenames.
       </p>
       <div class="toolbar">
         <label class="model-picker" for="embedding-model">
           Embedding model
           <select id="embedding-model"></select>
+        </label>
+        <label class="model-picker" for="chat-model">
+          Chat model
+          <select id="chat-model"></select>
         </label>
         <button type="button" class="secondary" id="ingest">Ingest docs</button>
       </div>
@@ -41,7 +46,9 @@
       const questionEl = document.getElementById("question");
       const ingestBtn = document.getElementById("ingest");
       const modelSelect = document.getElementById("embedding-model");
+      const chatSelect = document.getElementById("chat-model");
       const MODEL_STORAGE_KEY = "ask-my-docs.embedding-model";
+      const CHAT_STORAGE_KEY = "ask-my-docs.chat-model";
 
       function setStatus(text, isError = false) {
         statusEl.textContent = text;
@@ -91,31 +98,43 @@
         }
       }
 
-      async function loadEmbeddingModels() {
-        const response = await fetch("/api/embedding-models");
+      async function fillModelSelect(select, endpoint, storageKey) {
+        const response = await fetch(endpoint);
         if (!response.ok) {
           throw new Error(await readError(response));
         }
         const data = await response.json();
-        modelSelect.replaceChildren();
+        select.replaceChildren();
         for (const model of data.models) {
           const option = document.createElement("option");
           option.value = model.id;
           option.textContent = model.label;
-          modelSelect.appendChild(option);
+          select.appendChild(option);
         }
-        const saved = localStorage.getItem(MODEL_STORAGE_KEY);
+        const saved = localStorage.getItem(storageKey);
         const ids = data.models.map((model) => model.id);
-        modelSelect.value = ids.includes(saved) ? saved : data.selected;
+        select.value = ids.includes(saved) ? saved : data.selected;
+      }
+
+      async function loadModels() {
+        await Promise.all([
+          fillModelSelect(modelSelect, "/api/embedding-models", MODEL_STORAGE_KEY),
+          fillModelSelect(chatSelect, "/api/chat-models", CHAT_STORAGE_KEY),
+        ]);
       }
 
       modelSelect.addEventListener("change", () => {
         localStorage.setItem(MODEL_STORAGE_KEY, modelSelect.value);
       });
 
+      chatSelect.addEventListener("change", () => {
+        localStorage.setItem(CHAT_STORAGE_KEY, chatSelect.value);
+      });
+
       ingestBtn.addEventListener("click", async () => {
         ingestBtn.disabled = true;
         modelSelect.disabled = true;
+        chatSelect.disabled = true;
         setStatus("Ingesting…");
         try {
           const response = await fetch("/api/ingest", {
@@ -134,6 +153,7 @@
         } finally {
           ingestBtn.disabled = false;
           modelSelect.disabled = false;
+          chatSelect.disabled = false;
         }
       });
 
@@ -146,11 +166,15 @@
         questionEl.value = "";
         setStatus("Asking…");
         if (submitBtn) submitBtn.disabled = true;
+        chatSelect.disabled = true;
         try {
           const response = await fetch("/api/ask", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ question }),
+            body: JSON.stringify({
+              question,
+              llm_model: chatSelect.value,
+            }),
           });
           if (!response.ok) {
             const detail = await readError(response);
@@ -172,10 +196,11 @@
           setStatus(String(err), true);
         } finally {
           if (submitBtn) submitBtn.disabled = false;
+          chatSelect.disabled = false;
         }
       });
 
-      loadEmbeddingModels().catch((err) => {
+      loadModels().catch((err) => {
         setStatus(String(err), true);
       });
     </script>

@@ -23,8 +23,19 @@ class EmbeddingModelsResponse(BaseModel):
     selected: str
 
 
+class ChatModelOption(BaseModel):
+    id: str
+    label: str
+
+
+class ChatModelsResponse(BaseModel):
+    models: list[ChatModelOption]
+    selected: str
+
+
 class AskRequest(BaseModel):
     question: str = Field(min_length=1)
+    llm_model: str | None = None
 
 
 class SearchRequest(BaseModel):
@@ -53,3 +64,4 @@ class Citation(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     citations: list[Citation] = Field(default_factory=list)
+    llm_model: str | None = None

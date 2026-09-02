@@ -5,6 +5,7 @@ from fastapi import APIRouter, Body, HTTPException
 from app.models import (
     AskRequest,
     AskResponse,
+    ChatModelsResponse,
     EmbeddingModelsResponse,
     IngestRequest,
     IngestResponse,
@@ -32,6 +33,11 @@ def health() -> dict[str, str]:
 @router.get("/embedding-models", response_model=EmbeddingModelsResponse)
 def embedding_models() -> EmbeddingModelsResponse:
     return pipeline.list_embedding_models()
+
+
+@router.get("/chat-models", response_model=ChatModelsResponse)
+def chat_models() -> ChatModelsResponse:
+    return pipeline.list_chat_models()
 
 
 @router.post("/ingest", response_model=IngestResponse)
@@ -67,7 +73,7 @@ def search(body: SearchRequest) -> SearchResponse:
 @router.post("/ask", response_model=AskResponse)
 def ask(body: AskRequest) -> AskResponse:
     try:
-        return pipeline.ask(body.question)
+        return pipeline.ask(body.question, llm_model=body.llm_model)
     except NotImplementedError as exc:
         raise _not_implemented() from exc
     except FileNotFoundError as exc:

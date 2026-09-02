@@ -5,7 +5,7 @@
 3. ingest          — embed chunks and store them locally (done)
 4. search          — embed the question, return top_k chunks (done)
 5. build_prompt    — system instructions + retrieved context + question (done)
-6. ask_llm         — call the provider; temperature 0 (done)
+6. ask_llm         — call the selected provider; temperature 0 (done)
 7. ask             — search → prompt → LLM → citations from chunk metadata (done)
 
 Search still prints retrieved chunks so retrieval can be checked before trusting answers.
@@ -22,7 +22,13 @@ from typing import NoReturn
 import httpx
 
 from app.config import PROJECT_ROOT, settings
-from app.models import Citation, EmbeddingModelsResponse, AskResponse, IngestResponse
+from app.models import (
+    AskResponse,
+    ChatModelsResponse,
+    Citation,
+    EmbeddingModelsResponse,
+    IngestResponse,
+)
 
 _ALLOWED_SUFFIXES = {".md", ".txt"}
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -31,7 +37,7 @@ _TARGET_CHARS = 2000
 _MAX_CHARS = 3200
 _OVERLAP_CHARS = 320
 _OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
-_OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
+_GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 _SYSTEM_PROMPT = (
     "You are Ask My Docs. Answer using only the document excerpts in the user "
     "message. If they do not contain the answer, reply with exactly: I don't know. "
@@ -49,6 +55,14 @@ _EMBEDDING_MODEL_CHOICES = (
     ("text-embedding-3-small", "OpenAI · text-embedding-3-small"),
     ("gemini-embedding-001", "Gemini · gemini-embedding-001"),
     ("all-MiniLM-L6-v2", "Local · all-MiniLM-L6-v2"),
+)
+_GEMINI_CHAT_MODELS = {"gemini-2.0-flash"}
+_OLLAMA_CHAT_MODELS = {"llama3.2", "llama3.2:3b"}
+_GROQ_CHAT_MODELS = {"llama-3.1-8b-instant"}
+_CHAT_MODEL_CHOICES = (
+    ("gemini-2.0-flash", "Gemini · gemini-2.0-flash"),
+    ("llama3.2", "Ollama · llama3.2 (3B)"),
+    ("llama-3.1-8b-instant", "Groq · llama-3.1-8b-instant"),
 )
 
 _minilm_model = None
@@ -266,6 +280,35 @@ def list_embedding_models() -> EmbeddingModelsResponse:
         models=[
             {"id": model_id, "label": label}
             for model_id, label in _EMBEDDING_MODEL_CHOICES
+        ],
+        selected=selected,
+    )
+
+
+def _chat_backend(model: str) -> str:
+    if model in _GEMINI_CHAT_MODELS:
+        return "gemini"
+    if model in _OLLAMA_CHAT_MODELS:
+        return "ollama"
+    if model in _GROQ_CHAT_MODELS:
+        return "groq"
+    raise ValueError(
+        f"Unsupported chat model {model!r}. Choose one of: "
+        "gemini-2.0-flash, llama3.2, llama-3.1-8b-instant."
+    )
+
+
+def list_chat_models() -> ChatModelsResponse:
+    ids = [model_id for model_id, _label in _CHAT_MODEL_CHOICES]
+    selected = settings.llm_model
+    if selected in _OLLAMA_CHAT_MODELS:
+        selected = "llama3.2"
+    if selected not in ids:
+        selected = ids[0]
+    return ChatModelsResponse(
+        models=[
+            {"id": model_id, "label": label}
+            for model_id, label in _CHAT_MODEL_CHOICES
         ],
         selected=selected,
     )
@@ -569,12 +612,87 @@ def ask_llm(messages: list[dict]) -> str:
 
 
 def _ask_llm(messages: list[dict]) -> tuple[str, dict | None]:
-    api_key = (settings.llm_api_key or "").strip()
-    if not api_key:
-        raise ValueError("LLM_API_KEY is required to ask the model.")
     if not messages:
         raise ValueError("messages must not be empty.")
+    backend = _chat_backend(settings.llm_model)
+    if backend == "gemini":
+        return _ask_gemini(messages)
+    if backend == "ollama":
+        return _ask_ollama(messages)
+    return _ask_groq(messages)
 
+
+def _messages_to_gemini(messages: list[dict]) -> dict:
+    system_parts: list[str] = []
+    contents: list[dict] = []
+    for message in messages:
+        role = message.get("role")
+        text = message.get("content") or ""
+        if role == "system":
+            if text:
+                system_parts.append(text)
+            continue
+        gemini_role = "model" if role == "assistant" else "user"
+        contents.append({"role": gemini_role, "parts": [{"text": text}]})
+    payload: dict = {
+        "contents": contents,
+        "generationConfig": {"temperature": settings.temperature},
+    }
+    if system_parts:
+        payload["systemInstruction"] = {
+            "parts": [{"text": "\n\n".join(system_parts)}]
+        }
+    return payload
+
+
+def _gemini_usage(data: dict) -> dict | None:
+    meta = data.get("usageMetadata")
+    if not isinstance(meta, dict):
+        return None
+    prompt = meta.get("promptTokenCount")
+    completion = meta.get("candidatesTokenCount")
+    if prompt is None and completion is None:
+        return None
+    return {"prompt_tokens": prompt, "completion_tokens": completion}
+
+
+def _ask_gemini(messages: list[dict]) -> tuple[str, dict | None]:
+    api_key = (settings.gemini_api_key or "").strip()
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is required to ask with Gemini.")
+    model = settings.llm_model
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent"
+    )
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key,
+    }
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            response = client.post(
+                url, headers=headers, json=_messages_to_gemini(messages)
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as exc:
+        _raise_http_error(exc, "LLM request")
+
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise RuntimeError("LLM response was missing candidates.")
+    parts = ((candidates[0].get("content") or {}).get("parts")) or []
+    content = "".join(part.get("text") or "" for part in parts).strip()
+    if not content:
+        raise RuntimeError("LLM response was missing text.")
+    return content, _gemini_usage(data)
+
+
+def _ask_groq(messages: list[dict]) -> tuple[str, dict | None]:
+    api_key = (settings.groq_api_key or "").strip()
+    if not api_key:
+        raise ValueError("GROQ_API_KEY is required to ask with Groq.")
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -586,7 +704,7 @@ def _ask_llm(messages: list[dict]) -> tuple[str, dict | None]:
     }
     try:
         with httpx.Client(timeout=60.0) as client:
-            response = client.post(_OPENAI_CHAT_URL, headers=headers, json=payload)
+            response = client.post(_GROQ_CHAT_URL, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPError as exc:
@@ -603,23 +721,71 @@ def _ask_llm(messages: list[dict]) -> tuple[str, dict | None]:
     return content, usage
 
 
-def ask(question: str) -> AskResponse:
+def _ollama_usage(data: dict) -> dict | None:
+    prompt = data.get("prompt_eval_count")
+    completion = data.get("eval_count")
+    if prompt is None and completion is None:
+        return None
+    return {"prompt_tokens": prompt, "completion_tokens": completion}
+
+
+def _ask_ollama(messages: list[dict]) -> tuple[str, dict | None]:
+    base = (settings.ollama_base_url or "http://127.0.0.1:11434").rstrip("/")
+    url = f"{base}/api/chat"
+    payload = {
+        "model": settings.llm_model,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": settings.temperature},
+    }
+    try:
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.ConnectError as exc:
+        raise RuntimeError(
+            f"Ollama is not reachable at {base}. Start Ollama and pull llama3.2."
+        ) from exc
+    except httpx.HTTPError as exc:
+        _raise_http_error(exc, "LLM request")
+
+    message = data.get("message") or {}
+    content = (message.get("content") or "").strip()
+    if not content:
+        raise RuntimeError("LLM response was missing text.")
+    return content, _ollama_usage(data)
+
+
+def ask(question: str, llm_model: str | None = None) -> AskResponse:
     """Retrieve, prompt, call the LLM, and attach citations from chunk metadata."""
     question = (question or "").strip()
     if not question:
         raise ValueError("Question must not be empty.")
 
-    started = time.perf_counter()
-    chunks = search(question)
-    if not chunks:
-        answer = "I don't know"
-        elapsed_ms = (time.perf_counter() - started) * 1000
-        _print_ask_result(question, answer, [], elapsed_ms)
-        return AskResponse(answer=answer, citations=[])
+    model = settings.llm_model
+    if llm_model is not None:
+        llm_model = llm_model.strip()
+        if llm_model:
+            _chat_backend(llm_model)
+            model = llm_model
 
-    messages = build_prompt(question, chunks)
-    answer, usage = _ask_llm(messages)
-    citations = [] if _looks_like_refuse(answer) else _citations_from_chunks(chunks)
-    elapsed_ms = (time.perf_counter() - started) * 1000
-    _print_ask_result(question, answer, citations, elapsed_ms, usage)
-    return AskResponse(answer=answer, citations=citations)
+    previous_model = settings.llm_model
+    settings.llm_model = model
+    try:
+        started = time.perf_counter()
+        chunks = search(question)
+        if not chunks:
+            answer = "I don't know"
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            _print_ask_result(question, answer, [], elapsed_ms)
+            return AskResponse(answer=answer, citations=[], llm_model=model)
+
+        messages = build_prompt(question, chunks)
+        answer, usage = _ask_llm(messages)
+        citations = [] if _looks_like_refuse(answer) else _citations_from_chunks(chunks)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        _print_ask_result(question, answer, citations, elapsed_ms, usage)
+        return AskResponse(answer=answer, citations=citations, llm_model=model)
+    finally:
+        settings.llm_model = previous_model

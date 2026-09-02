@@ -59,7 +59,7 @@ h1 {
 }
 
 .model-picker select {
-  min-width: 16rem;
+  min-width: 14rem;
   padding: 0.55rem 0.7rem;
   border-radius: 8px;
   border: 1px solid var(--border);
