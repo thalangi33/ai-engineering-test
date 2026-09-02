@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from dataclasses import asdict
 
 from app.config import settings
-from app.rag.pipeline import ingest
+from app.rag.pipeline import _read_index, ingest
 from evals.score import evaluate_all, format_report, load_cases, tally
 
 
@@ -42,6 +43,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _index_embedding_model() -> str:
+    try:
+        payload = _read_index()
+    except (FileNotFoundError, ValueError):
+        return settings.embedding_model
+    return str(payload.get("embedding_model") or settings.embedding_model)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.ingest:
@@ -49,14 +58,17 @@ def main(argv: list[str] | None = None) -> int:
         print(result.message, file=sys.stderr)
 
     cases = load_cases()
-    scores = evaluate_all(cases, retrieval_only=args.retrieval_only)
+    # Search/ask print retrieved chunks; keep those on stderr so --json stays valid.
+    with contextlib.redirect_stdout(sys.stderr):
+        scores = evaluate_all(cases, retrieval_only=args.retrieval_only)
     counts = tally(scores)
+    embedding_model = _index_embedding_model()
     if args.as_json:
         print(
             json.dumps(
                 {
                     "index_path": str(settings.index_path),
-                    "embedding_model": settings.embedding_model,
+                    "embedding_model": embedding_model,
                     "llm_model": settings.llm_model,
                     "retrieval_only": args.retrieval_only,
                     "summary": counts,
@@ -70,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
             "Ask My Docs evals  "
             "(retrieval vs answer scored separately)\n"
             f"index: {settings.index_path}  "
-            f"embedding: {settings.embedding_model}  "
+            f"embedding: {embedding_model}  "
             f"chat: {settings.llm_model}\n"
         )
         print(format_report(scores))
