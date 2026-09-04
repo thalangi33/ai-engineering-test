@@ -38,6 +38,7 @@ _MAX_CHARS = 3200
 _OVERLAP_CHARS = 320
 _OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
 _GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+_DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions"
 _SYSTEM_PROMPT = (
     "You are Ask My Docs. Answer using only the document excerpts in the user "
     "message. If they do not contain the answer, reply with exactly: I don't know. "
@@ -59,10 +60,12 @@ _EMBEDDING_MODEL_CHOICES = (
 _GEMINI_CHAT_MODELS = {"gemini-2.0-flash"}
 _OLLAMA_CHAT_MODELS = {"llama3.2", "llama3.2:3b"}
 _GROQ_CHAT_MODELS = {"llama-3.1-8b-instant"}
+_DEEPSEEK_CHAT_MODELS = {"deepseek-v4-flash"}
 _CHAT_MODEL_CHOICES = (
     ("gemini-2.0-flash", "Gemini · gemini-2.0-flash"),
     ("llama3.2", "Ollama · llama3.2 (3B)"),
     ("llama-3.1-8b-instant", "Groq · llama-3.1-8b-instant"),
+    ("deepseek-v4-flash", "DeepSeek · deepseek-v4-flash"),
 )
 
 _minilm_model = None
@@ -292,9 +295,11 @@ def _chat_backend(model: str) -> str:
         return "ollama"
     if model in _GROQ_CHAT_MODELS:
         return "groq"
+    if model in _DEEPSEEK_CHAT_MODELS:
+        return "deepseek"
     raise ValueError(
         f"Unsupported chat model {model!r}. Choose one of: "
-        "gemini-2.0-flash, llama3.2, llama-3.1-8b-instant."
+        "gemini-2.0-flash, llama3.2, llama-3.1-8b-instant, deepseek-v4-flash."
     )
 
 
@@ -619,7 +624,9 @@ def _ask_llm(messages: list[dict]) -> tuple[str, dict | None]:
         return _ask_gemini(messages)
     if backend == "ollama":
         return _ask_ollama(messages)
-    return _ask_groq(messages)
+    if backend == "groq":
+        return _ask_groq(messages)
+    return _ask_deepseek(messages)
 
 
 def _messages_to_gemini(messages: list[dict]) -> dict:
@@ -705,6 +712,39 @@ def _ask_groq(messages: list[dict]) -> tuple[str, dict | None]:
     try:
         with httpx.Client(timeout=60.0) as client:
             response = client.post(_GROQ_CHAT_URL, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as exc:
+        _raise_http_error(exc, "LLM request")
+
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("LLM response was missing choices.")
+    message = choices[0].get("message") or {}
+    content = (message.get("content") or "").strip()
+    if not content:
+        raise RuntimeError("LLM response was missing text.")
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+    return content, usage
+
+
+def _ask_deepseek(messages: list[dict]) -> tuple[str, dict | None]:
+    api_key = (settings.deepseek_api_key or "").strip()
+    if not api_key:
+        raise ValueError("DEEPSEEK_API_KEY is required to ask with DeepSeek.")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": settings.llm_model,
+        "temperature": settings.temperature,
+        "messages": messages,
+        "thinking": {"type": "disabled"},
+    }
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            response = client.post(_DEEPSEEK_CHAT_URL, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPError as exc:

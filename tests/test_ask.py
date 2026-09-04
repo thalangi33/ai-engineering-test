@@ -107,6 +107,53 @@ def test_ask_llm_posts_groq_chat_completion(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured["json"]["messages"] == messages
 
 
+def test_ask_llm_posts_deepseek_chat_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    class FakeClient:
+        def __init__(self, timeout=None):
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            request = httpx.Request("POST", url)
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": "  Ask My Docs answers from local files.  "}}
+                    ],
+                    "usage": {"prompt_tokens": 18, "completion_tokens": 7},
+                },
+                request=request,
+            )
+
+    monkeypatch.setattr(pipeline.httpx, "Client", FakeClient)
+    monkeypatch.setattr(settings, "deepseek_api_key", "sk-deepseek-test")
+    monkeypatch.setattr(settings, "llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(settings, "temperature", 0.0)
+
+    messages = [{"role": "user", "content": "What is Ask My Docs?"}]
+    answer, usage = pipeline._ask_llm(messages)
+
+    assert answer == "Ask My Docs answers from local files."
+    assert usage == {"prompt_tokens": 18, "completion_tokens": 7}
+    assert captured["url"] == "https://api.deepseek.com/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer sk-deepseek-test"
+    assert captured["json"]["model"] == "deepseek-v4-flash"
+    assert captured["json"]["temperature"] == 0.0
+    assert captured["json"]["thinking"] == {"type": "disabled"}
+    assert captured["json"]["messages"] == messages
+
+
 def test_ask_llm_posts_gemini_generate_content(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 
@@ -214,6 +261,13 @@ def test_ask_llm_requires_groq_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "llm_model", "llama-3.1-8b-instant")
     monkeypatch.setattr(settings, "groq_api_key", "")
     with pytest.raises(ValueError, match="GROQ_API_KEY"):
+        ask_llm([{"role": "user", "content": "hi"}])
+
+
+def test_ask_llm_requires_deepseek_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(settings, "deepseek_api_key", "  ")
+    with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
         ask_llm([{"role": "user", "content": "hi"}])
 
 
@@ -359,19 +413,21 @@ def test_ask_rejects_empty_question() -> None:
         ask("   ")
 
 
-def test_list_chat_models_includes_gemini_ollama_and_groq(
+def test_list_chat_models_includes_gemini_ollama_groq_and_deepseek(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(settings, "llm_model", "llama-3.1-8b-instant")
+    monkeypatch.setattr(settings, "llm_model", "deepseek-v4-flash")
     listed = pipeline.list_chat_models()
     assert [model.id for model in listed.models] == [
         "gemini-2.0-flash",
         "llama3.2",
         "llama-3.1-8b-instant",
+        "deepseek-v4-flash",
     ]
-    assert listed.selected == "llama-3.1-8b-instant"
+    assert listed.selected == "deepseek-v4-flash"
     assert "Ollama" in listed.models[1].label
     assert "3B" in listed.models[1].label
+    assert "DeepSeek" in listed.models[3].label
 
 
 def test_ask_uses_requested_chat_model_and_restores_setting(
