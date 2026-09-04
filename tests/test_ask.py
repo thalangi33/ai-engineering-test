@@ -49,6 +49,8 @@ def test_build_prompt_includes_question_chunks_and_refuse_instruction() -> None:
     system = messages[0]["content"].lower()
     assert "only" in system
     assert "i don't know" in system
+    assert "winner" in system
+    assert "name a best" in system
     user = messages[1]["content"]
     assert "What is Ask My Docs?" in user
     assert "docs/what-ask-my-docs-is.md" in user
@@ -104,6 +106,53 @@ def test_ask_llm_posts_groq_chat_completion(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured["headers"]["Authorization"] == "Bearer gsk-test"
     assert captured["json"]["model"] == "llama-3.1-8b-instant"
     assert captured["json"]["temperature"] == 0.0
+    assert captured["json"]["messages"] == messages
+
+
+def test_ask_llm_posts_deepseek_chat_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    class FakeClient:
+        def __init__(self, timeout=None):
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            request = httpx.Request("POST", url)
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": "  Ask My Docs answers from local files.  "}}
+                    ],
+                    "usage": {"prompt_tokens": 18, "completion_tokens": 7},
+                },
+                request=request,
+            )
+
+    monkeypatch.setattr(pipeline.httpx, "Client", FakeClient)
+    monkeypatch.setattr(settings, "deepseek_api_key", "sk-deepseek-test")
+    monkeypatch.setattr(settings, "llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(settings, "temperature", 0.0)
+
+    messages = [{"role": "user", "content": "What is Ask My Docs?"}]
+    answer, usage = pipeline._ask_llm(messages)
+
+    assert answer == "Ask My Docs answers from local files."
+    assert usage == {"prompt_tokens": 18, "completion_tokens": 7}
+    assert captured["url"] == "https://api.deepseek.com/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer sk-deepseek-test"
+    assert captured["json"]["model"] == "deepseek-v4-flash"
+    assert captured["json"]["temperature"] == 0.0
+    assert captured["json"]["thinking"] == {"type": "disabled"}
     assert captured["json"]["messages"] == messages
 
 
@@ -217,6 +266,13 @@ def test_ask_llm_requires_groq_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
         ask_llm([{"role": "user", "content": "hi"}])
 
 
+def test_ask_llm_requires_deepseek_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(settings, "deepseek_api_key", "  ")
+    with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
+        ask_llm([{"role": "user", "content": "hi"}])
+
+
 def test_ask_llm_reports_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeClient:
         def __init__(self, timeout=None):
@@ -257,6 +313,60 @@ def test_ask_llm_reports_ollama_unreachable(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(settings, "llm_model", "llama3.2")
     with pytest.raises(RuntimeError, match="Ollama is not reachable"):
         ask_llm([{"role": "user", "content": "hi"}])
+
+
+def test_ask_expands_hits_to_full_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    _write_index(
+        index_path,
+        [
+            {
+                "text": "LeBron James is a forward for the Los Angeles Lakers.",
+                "source": "docs/nba/lebron-james.md",
+                "chunk_index": 0,
+                "heading": "LeBron James",
+                "embedding": [1.0, 0.0, 0.0],
+            },
+            {
+                "text": "James has four NBA titles and four MVP awards.",
+                "source": "docs/nba/lebron-james.md",
+                "chunk_index": 1,
+                "heading": "Championships and records",
+                "embedding": [0.1, 0.0, 0.0],
+            },
+            {
+                "text": "The weather in Tokyo is not in these notes.",
+                "source": "docs/unrelated.md",
+                "chunk_index": 0,
+                "heading": None,
+                "embedding": [0.0, 0.0, 1.0],
+            },
+        ],
+    )
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "top_k", 1)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0, 0.0]],
+    )
+    seen: dict = {}
+
+    def fake_llm(messages: list[dict]) -> tuple[str, None]:
+        seen["user"] = messages[1]["content"]
+        return "LeBron James has four NBA titles.", None
+
+    monkeypatch.setattr(pipeline, "_ask_llm", fake_llm)
+
+    result = ask("Who is LeBron James?")
+
+    assert "four NBA titles" in seen["user"]
+    assert "forward for the Los Angeles Lakers" in seen["user"]
+    assert [citation.source for citation in result.citations] == [
+        "docs/nba/lebron-james.md"
+    ]
 
 
 def test_ask_returns_answer_and_citations_from_metadata(
@@ -359,19 +469,21 @@ def test_ask_rejects_empty_question() -> None:
         ask("   ")
 
 
-def test_list_chat_models_includes_gemini_ollama_and_groq(
+def test_list_chat_models_includes_gemini_ollama_groq_and_deepseek(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(settings, "llm_model", "llama-3.1-8b-instant")
+    monkeypatch.setattr(settings, "llm_model", "deepseek-v4-flash")
     listed = pipeline.list_chat_models()
     assert [model.id for model in listed.models] == [
         "gemini-2.0-flash",
         "llama3.2",
         "llama-3.1-8b-instant",
+        "deepseek-v4-flash",
     ]
-    assert listed.selected == "llama-3.1-8b-instant"
+    assert listed.selected == "deepseek-v4-flash"
     assert "Ollama" in listed.models[1].label
     assert "3B" in listed.models[1].label
+    assert "DeepSeek" in listed.models[3].label
 
 
 def test_ask_uses_requested_chat_model_and_restores_setting(

@@ -50,6 +50,7 @@ def test_chat_models_lists_options() -> None:
         "gemini-2.0-flash",
         "llama3.2",
         "llama-3.1-8b-instant",
+        "deepseek-v4-flash",
     ]
     assert body["selected"] in ids
     assert all(model["label"] for model in body["models"])
@@ -274,12 +275,12 @@ def test_ask_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     response = client.post(
         "/api/ask",
-        json={"question": "What is Ask My Docs?", "llm_model": "llama3.2"},
+        json={"question": "What is Ask My Docs?", "llm_model": "deepseek-v4-flash"},
     )
     assert response.status_code == 200
     body = response.json()
     assert body["answer"] == "It answers from local documents."
-    assert body["llm_model"] == "llama3.2"
+    assert body["llm_model"] == "deepseek-v4-flash"
     assert body["citations"][0]["source"] == "docs/what-ask-my-docs-is.md"
     assert "Ask My Docs answers from local documents." in body["citations"][0]["snippet"]
 
@@ -317,6 +318,41 @@ def test_ask_reports_missing_api_key(
     response = client.post("/api/ask", json={"question": "Where do notes go?"})
     assert response.status_code == 400
     assert "gemini_api_key" in response.json()["detail"].lower()
+
+
+def test_ask_reports_missing_deepseek_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    index_path.write_text(
+        json.dumps(
+            {
+                "embedding_model": "all-MiniLM-L6-v2",
+                "chunks": [
+                    {
+                        "text": "Notes live in docs.",
+                        "source": "docs/folder-conventions.md",
+                        "chunk_index": 0,
+                        "heading": None,
+                        "embedding": [1.0, 0.0],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "deepseek_api_key", "")
+    monkeypatch.setattr(settings, "llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0]],
+    )
+
+    response = client.post("/api/ask", json={"question": "Where do notes go?"})
+    assert response.status_code == 400
+    assert "deepseek_api_key" in response.json()["detail"].lower()
 
 
 def test_ask_rejects_unknown_chat_model(

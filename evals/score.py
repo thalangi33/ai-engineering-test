@@ -58,6 +58,16 @@ def source_in(expected: str | None, sources: list[str]) -> bool:
     return False
 
 
+def expected_sources(case: dict[str, Any]) -> list[str]:
+    listed = case.get("expected_sources")
+    if isinstance(listed, list):
+        return [str(item) for item in listed if item]
+    one = case.get("expected_source")
+    if one:
+        return [str(one)]
+    return []
+
+
 def _citation_sources(citations: Any) -> list[str]:
     sources: list[str] = []
     for citation in citations or []:
@@ -78,17 +88,28 @@ def missing_phrases(text: str, phrases: list[str] | None) -> list[str]:
     return missing
 
 
+def extra_phrases(text: str, phrases: list[str] | None) -> list[str]:
+    haystack = (text or "").lower()
+    extra: list[str] = []
+    for phrase in phrases or []:
+        needle = (phrase or "").strip().lower()
+        if needle and needle in haystack:
+            extra.append(phrase)
+    return extra
+
+
 def score_retrieval(
     case: dict[str, Any], chunks: list[dict[str, Any]]
 ) -> tuple[bool | None, str]:
-    expected = case.get("expected_source")
+    wanted = expected_sources(case)
     sources = [str(chunk.get("source") or "") for chunk in chunks]
-    if case.get("should_refuse") or not expected:
+    if case.get("should_refuse") or not wanted:
         return None, "n/a (no expected source)"
-    if source_in(expected, sources):
-        return True, f"found {expected} in top-{len(chunks)}"
+    missing = [item for item in wanted if not source_in(item, sources)]
+    if not missing:
+        return True, f"found {', '.join(wanted)} in top-{len(chunks)}"
     listed = ", ".join(sources) if sources else "(none)"
-    return False, f"{expected} not in top-{len(chunks)}: {listed}"
+    return False, f"{', '.join(missing)} not in top-{len(chunks)}: {listed}"
 
 
 def score_answer(
@@ -109,13 +130,18 @@ def score_answer(
         return False, "refused but the answer is in the docs"
     if not (answer or "").strip():
         return False, "empty answer"
-    expected = case.get("expected_source")
-    if expected and not source_in(expected, sources):
-        listed = ", ".join(sources) if sources else "(none)"
-        return False, f"missing citation {expected}: {listed}"
+    wanted = expected_sources(case)
+    if wanted:
+        missing_cites = [item for item in wanted if not source_in(item, sources)]
+        if missing_cites:
+            listed = ", ".join(sources) if sources else "(none)"
+            return False, f"missing citation {', '.join(missing_cites)}: {listed}"
     missing = missing_phrases(answer, case.get("must_contain") or [])
     if missing:
         return False, "fluent-but-wrong; missing: " + ", ".join(missing)
+    forbidden = extra_phrases(answer, case.get("must_not_contain") or [])
+    if forbidden:
+        return False, "forbidden phrase: " + ", ".join(forbidden)
     return True, "grounded answer with required phrases"
 
 

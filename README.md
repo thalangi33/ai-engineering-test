@@ -27,7 +27,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-API keys depend on the providers you pick. OpenAI embeddings need `LLM_API_KEY`. Gemini embeddings and `gemini-2.0-flash` need `GEMINI_API_KEY`. Groq `llama-3.1-8b-instant` needs `GROQ_API_KEY`. Local MiniLM and Ollama `llama3.2` do not need a cloud key (Ollama must be running). Do not put secrets in `docs/` — ingested text is sent to the selected LLM provider when you ask.
+API keys depend on the providers you pick. OpenAI embeddings need `LLM_API_KEY`. Gemini embeddings and `gemini-2.0-flash` need `GEMINI_API_KEY`. Groq `llama-3.1-8b-instant` needs `GROQ_API_KEY`. DeepSeek `deepseek-v4-flash` needs `DEEPSEEK_API_KEY`. Local MiniLM and Ollama `llama3.2` do not need a cloud key (Ollama must be running). Do not put secrets in `docs/` — ingested text is sent to the selected LLM provider when you ask.
 
 ## Run
 
@@ -65,7 +65,7 @@ Exit code 1 if any scored check fails. `--json` prints machine-readable results.
 | `ingest` | Embed and persist a local index |
 | `search` | Top-k chunks for a question |
 | `build_prompt` | Answer only from context; otherwise "I don't know" |
-| `ask_llm` | Gemini, Ollama llama3.2, or Groq; temperature 0 |
+| `ask_llm` | Gemini, Ollama llama3.2, Groq, or DeepSeek; temperature 0 |
 | `ask` | Search → prompt → LLM → citations from chunk metadata |
 | `python -m evals` | Score retrieval vs answer on `evals/questions.json` |
 
