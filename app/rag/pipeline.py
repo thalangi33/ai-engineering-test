@@ -121,6 +121,12 @@ def load_documents(docs_dir: Path) -> list[dict]:
     for path in sorted(docs_dir.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in _ALLOWED_SUFFIXES:
             continue
+        try:
+            relative = path.relative_to(docs_dir)
+        except ValueError:
+            relative = path
+        if "adr" in relative.parts:
+            continue
         text = path.read_text(encoding="utf-8")
         try:
             stored_path = path.relative_to(PROJECT_ROOT).as_posix()

@@ -5,7 +5,7 @@ A local-notes answering context: a person asks about files in a folder and gets 
 ## Language
 
 **Note**:
-A markdown or text file in the documents folder that Ask My Docs is allowed to use as evidence.
+A markdown or text file in the documents folder that Ask My Docs is allowed to use as evidence. Engineering decision records are not Notes.
 _Avoid_: Document, file, knowledge base, corpus item
 
 **Ask**:
