@@ -20,6 +20,7 @@ def test_load_sample_docs() -> None:
     assert "all-time leading scorer" in by_path["docs/nba/lebron-james.md"]
     assert "unanimous MVP" in by_path["docs/nba/stephen-curry.md"]
     assert "Sombor, Serbia" in by_path["docs/nba/nikola-jokic.md"]
+    assert all("/adr/" not in path for path in by_path)
 
 
 def test_load_skips_unsupported_files_and_reads_nested(tmp_path: Path) -> None:
@@ -29,6 +30,9 @@ def test_load_skips_unsupported_files_and_reads_nested(tmp_path: Path) -> None:
     nested = tmp_path / "sub"
     nested.mkdir()
     (nested / "nested.txt").write_text("nested", encoding="utf-8")
+    adr = tmp_path / "adr"
+    adr.mkdir()
+    (adr / "0001-skip-me.md").write_text("decision record", encoding="utf-8")
 
     documents = load_documents(tmp_path)
 

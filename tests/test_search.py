@@ -68,7 +68,6 @@ def test_search_ranks_closest_chunk_first(
     assert [chunk["source"] for chunk in results] == [
         "docs/nba/lebron-james.md",
         "docs/nba/stephen-curry.md",
-        "docs/unrelated.md",
     ]
     assert results[0]["score"] > results[1]["score"]
     assert results[0]["heading"] == "LeBron James"
@@ -89,10 +88,11 @@ def test_search_respects_top_k(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         lambda texts, for_query=False: [[1.0, 0.0, 0.0]],
     )
 
-    results = search("LeBron", top_k=2)
+    results = search("LeBron Curry", top_k=2)
 
     assert len(results) == 2
     assert results[0]["source"] == "docs/nba/lebron-james.md"
+    assert results[1]["source"] == "docs/nba/stephen-curry.md"
 
 
 def test_search_uses_index_embedding_model_and_query_task(
@@ -146,6 +146,136 @@ def test_search_rejects_empty_question(
     monkeypatch.setattr(settings, "index_path", tmp_path / "index.json")
     with pytest.raises(ValueError, match="must not be empty"):
         search("   ")
+
+
+def test_keyword_score_matches_heading_and_filename() -> None:
+    tokens = pipeline._tokens("who is better lebron or curry?")
+    assert "lebron" in tokens
+    assert "curry" in tokens
+    assert "better" not in tokens
+    lebron = {
+        "text": "A forward for the Lakers.",
+        "source": "docs/nba/lebron-james.md",
+        "heading": "LeBron James",
+    }
+    curry = {
+        "text": "A point guard for the Warriors.",
+        "source": "docs/nba/stephen-curry.md",
+        "heading": "Stephen Curry",
+    }
+    assert pipeline._keyword_score(tokens, lebron) == pytest.approx(0.5)
+    assert pipeline._keyword_score(tokens, curry) == pytest.approx(0.5)
+
+
+def test_search_drops_non_positive_scores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    _write_index(index_path, _sample_chunks())
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "top_k", 5)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0, 0.0]],
+    )
+
+    results = search("zzzz-no-overlap")
+
+    assert [chunk["source"] for chunk in results] == ["docs/nba/lebron-james.md"]
+    assert results[0]["score"] > 0
+
+
+def test_search_caps_chunks_per_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    _write_index(
+        index_path,
+        [
+            {
+                "text": "LeBron bio.",
+                "source": "docs/nba/lebron-james.md",
+                "chunk_index": 0,
+                "heading": "LeBron James",
+                "embedding": [1.0, 0.0, 0.0],
+            },
+            {
+                "text": "LeBron titles.",
+                "source": "docs/nba/lebron-james.md",
+                "chunk_index": 1,
+                "heading": "Championships",
+                "embedding": [0.99, 0.0, 0.0],
+            },
+            {
+                "text": "LeBron style.",
+                "source": "docs/nba/lebron-james.md",
+                "chunk_index": 2,
+                "heading": "Playing style",
+                "embedding": [0.98, 0.0, 0.0],
+            },
+            {
+                "text": "Stephen Curry bio.",
+                "source": "docs/nba/stephen-curry.md",
+                "chunk_index": 0,
+                "heading": "Stephen Curry",
+                "embedding": [0.5, 0.5, 0.0],
+            },
+        ],
+    )
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "top_k", 3)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0, 0.0]],
+    )
+
+    results = search("LeBron James versus Curry")
+
+    sources = [chunk["source"] for chunk in results]
+    assert sources.count("docs/nba/lebron-james.md") == 2
+    assert "docs/nba/stephen-curry.md" in sources
+
+
+def test_search_expand_notes_includes_sibling_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    _write_index(
+        index_path,
+        [
+            {
+                "text": "LeBron James is a forward.",
+                "source": "docs/nba/lebron-james.md",
+                "chunk_index": 0,
+                "heading": "LeBron James",
+                "embedding": [1.0, 0.0, 0.0],
+            },
+            {
+                "text": "James has four NBA titles.",
+                "source": "docs/nba/lebron-james.md",
+                "chunk_index": 1,
+                "heading": "Championships",
+                "embedding": [0.1, 0.9, 0.0],
+            },
+        ],
+    )
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "top_k", 1)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0, 0.0]],
+    )
+
+    hits = search("Who is LeBron James?")
+    assert len(hits) == 1
+    assert hits[0]["chunk_index"] == 0
+
+    expanded = search("Who is LeBron James?", expand_notes=True)
+    assert [chunk["chunk_index"] for chunk in expanded] == [0, 1]
+    assert all(chunk["source"] == "docs/nba/lebron-james.md" for chunk in expanded)
 
 
 def test_search_invalid_index_json(

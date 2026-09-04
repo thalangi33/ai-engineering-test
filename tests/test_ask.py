@@ -49,6 +49,8 @@ def test_build_prompt_includes_question_chunks_and_refuse_instruction() -> None:
     system = messages[0]["content"].lower()
     assert "only" in system
     assert "i don't know" in system
+    assert "winner" in system
+    assert "name a best" in system
     user = messages[1]["content"]
     assert "What is Ask My Docs?" in user
     assert "docs/what-ask-my-docs-is.md" in user
@@ -311,6 +313,60 @@ def test_ask_llm_reports_ollama_unreachable(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(settings, "llm_model", "llama3.2")
     with pytest.raises(RuntimeError, match="Ollama is not reachable"):
         ask_llm([{"role": "user", "content": "hi"}])
+
+
+def test_ask_expands_hits_to_full_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    _write_index(
+        index_path,
+        [
+            {
+                "text": "LeBron James is a forward for the Los Angeles Lakers.",
+                "source": "docs/nba/lebron-james.md",
+                "chunk_index": 0,
+                "heading": "LeBron James",
+                "embedding": [1.0, 0.0, 0.0],
+            },
+            {
+                "text": "James has four NBA titles and four MVP awards.",
+                "source": "docs/nba/lebron-james.md",
+                "chunk_index": 1,
+                "heading": "Championships and records",
+                "embedding": [0.1, 0.0, 0.0],
+            },
+            {
+                "text": "The weather in Tokyo is not in these notes.",
+                "source": "docs/unrelated.md",
+                "chunk_index": 0,
+                "heading": None,
+                "embedding": [0.0, 0.0, 1.0],
+            },
+        ],
+    )
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "top_k", 1)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0, 0.0]],
+    )
+    seen: dict = {}
+
+    def fake_llm(messages: list[dict]) -> tuple[str, None]:
+        seen["user"] = messages[1]["content"]
+        return "LeBron James has four NBA titles.", None
+
+    monkeypatch.setattr(pipeline, "_ask_llm", fake_llm)
+
+    result = ask("Who is LeBron James?")
+
+    assert "four NBA titles" in seen["user"]
+    assert "forward for the Los Angeles Lakers" in seen["user"]
+    assert [citation.source for citation in result.citations] == [
+        "docs/nba/lebron-james.md"
+    ]
 
 
 def test_ask_returns_answer_and_citations_from_metadata(

@@ -7,6 +7,7 @@ from app.models import AskResponse, Citation
 from evals.score import (
     evaluate_all,
     evaluate_case,
+    extra_phrases,
     format_report,
     load_cases,
     missing_phrases,
@@ -32,14 +33,24 @@ def _case(**overrides):
 def test_load_cases_from_repo() -> None:
     cases = load_cases()
     ids = [case["id"] for case in cases]
-    assert ids == ["easy-1", "easy-2", "easy-3", "paraphrase-1", "refuse-1"]
+    assert ids == [
+        "easy-1",
+        "easy-2",
+        "easy-3",
+        "paraphrase-1",
+        "refuse-1",
+        "compare-1",
+        "rank-1",
+        "refuse-2",
+    ]
     refuse = next(case for case in cases if case["id"] == "refuse-1")
     assert refuse["should_refuse"] is True
     assert refuse["expected_source"] is None
     for case in cases:
-        if not case["should_refuse"]:
-            assert case["expected_source"]
-            assert case["must_contain"]
+        if case["should_refuse"]:
+            continue
+        assert case.get("expected_source") or case.get("expected_sources")
+        assert case["must_contain"]
 
 
 def test_source_in_normalizes_paths() -> None:
@@ -49,6 +60,49 @@ def test_source_in_normalizes_paths() -> None:
         ["/workspace/docs/what-ask-my-docs-is.md"],
     )
     assert not source_in("docs/what-ask-my-docs-is.md", ["docs/nba/lebron-james.md"])
+
+
+def test_score_retrieval_requires_all_expected_sources() -> None:
+    case = _case(
+        id="compare-1",
+        expected_source=None,
+        expected_sources=["docs/nba/lebron-james.md", "docs/nba/stephen-curry.md"],
+        must_contain=["lebron", "curry"],
+    )
+    passed, _ = score_retrieval(
+        case,
+        [
+            {"source": "docs/nba/lebron-james.md"},
+            {"source": "docs/nba/stephen-curry.md"},
+        ],
+    )
+    assert passed is True
+
+    failed, detail = score_retrieval(case, [{"source": "docs/nba/lebron-james.md"}])
+    assert failed is False
+    assert "stephen-curry.md" in detail
+
+
+def test_score_answer_rejects_forbidden_phrase() -> None:
+    case = _case(must_not_contain=["greatest of all time"])
+    citations = [Citation(source="docs/what-ask-my-docs-is.md", snippet="local folder")]
+    passed, _ = score_answer(
+        case,
+        "Ask My Docs answers from a local folder of documents, with citations.",
+        citations,
+    )
+    assert passed is True
+
+    failed, detail = score_answer(
+        case,
+        "Ask My Docs answers from a local folder of documents. It is the greatest of all time.",
+        citations,
+    )
+    assert failed is False
+    assert "forbidden phrase" in detail
+    assert extra_phrases("greatest of all time", ["greatest of all time"]) == [
+        "greatest of all time"
+    ]
 
 
 def test_score_retrieval_pass_and_fail() -> None:
