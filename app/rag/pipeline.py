@@ -3,10 +3,10 @@
 1. load_documents  — read text from settings.docs_dir (done)
 2. chunk_text      — split documents into overlapping chunks with metadata (done)
 3. ingest          — embed chunks and store them locally (done)
-4. search          — embed the question, return top_k chunks (done)
-5. build_prompt    — system instructions + retrieved context + question (done)
+4. search          — hybrid score (cosine + keywords), cap per Note, optional full-Note expand
+5. build_prompt    — grounded comparison: facts from excerpts, no invented winner
 6. ask_llm         — call the selected provider; temperature 0 (done)
-7. ask             — search → prompt → LLM → citations from chunk metadata (done)
+7. ask             — search (expanded Notes) → prompt → LLM → citations from metadata
 
 Search still prints retrieved chunks so retrieval can be checked before trusting answers.
 Citations come from retrieved chunk metadata, not from the model inventing filenames.
@@ -41,10 +41,50 @@ _GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 _DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions"
 _SYSTEM_PROMPT = (
     "You are Ask My Docs. Answer using only the document excerpts in the user "
-    "message. If they do not contain the answer, reply with exactly: I don't know. "
-    "Do not use outside knowledge. Do not invent filenames, sources, or facts."
+    "message. Do not use outside knowledge. Do not invent filenames, sources, or facts. "
+    "If the excerpts support a comparison, contrast only facts that appear there and "
+    "do not name a winner unless an excerpt explicitly does. If the question asks who "
+    "or what is best and the excerpts do not name one, compare the documented facts "
+    "and say the notes do not name a best. If the excerpts do not contain the answer "
+    "or enough facts to compare, reply with exactly: I don't know."
 )
 _REFUSE_RE = re.compile(r"^\s*i (don't|do not) know\.?\s*$", re.IGNORECASE)
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_STOPWORDS = {
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "vs",
+    "versus",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "do",
+    "does",
+    "did",
+    "who",
+    "what",
+    "where",
+    "when",
+    "why",
+    "how",
+    "of",
+    "in",
+    "on",
+    "for",
+    "to",
+    "with",
+    "than",
+    "better",
+    "best",
+}
+_COSINE_WEIGHT = 0.7
+_KEYWORD_WEIGHT = 0.3
+_MAX_CHUNKS_PER_SOURCE = 2
 _SNIPPET_CHARS = 240
 _OPENAI_EMBED_BATCH_SIZE = 64
 _GEMINI_EMBED_BATCH_SIZE = 100
@@ -229,6 +269,107 @@ def _read_index() -> dict:
     if not isinstance(chunks, list):
         raise ValueError("Vector index is missing a chunks list. Re-run ingest.")
     return payload
+
+
+def _tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in _TOKEN_RE.findall((text or "").lower())
+        if len(token) > 2 and token not in _STOPWORDS
+    }
+
+
+def _keyword_score(question_tokens: set[str], chunk: dict) -> float:
+    """Fraction of question tokens that appear in the chunk text, heading, or path."""
+    if not question_tokens:
+        return 0.0
+    source = (chunk.get("source") or "").replace("\\", "/")
+    source_bits = (
+        source.replace("/", " ").replace("-", " ").replace("_", " ").replace(".", " ")
+    )
+    haystack = " ".join(
+        (
+            chunk.get("text") or "",
+            chunk.get("heading") or "",
+            source_bits,
+        )
+    )
+    chunk_tokens = _tokens(haystack)
+    hits = sum(1 for token in question_tokens if token in chunk_tokens)
+    return hits / len(question_tokens)
+
+
+def _hybrid_score(cosine: float, keyword: float) -> float:
+    return _COSINE_WEIGHT * cosine + _KEYWORD_WEIGHT * keyword
+
+
+def _select_diverse(
+    scored: list[tuple[float, dict]],
+    k: int,
+    *,
+    max_per_source: int = _MAX_CHUNKS_PER_SOURCE,
+) -> list[tuple[float, dict]]:
+    """Keep top-k hits but cap how many excerpts come from one Note."""
+    selected: list[tuple[float, dict]] = []
+    per_source: dict[str, int] = {}
+    overflow: list[tuple[float, dict]] = []
+    for score, chunk in scored:
+        if score <= 0:
+            continue
+        source = chunk.get("source") or ""
+        if per_source.get(source, 0) < max_per_source:
+            selected.append((score, chunk))
+            per_source[source] = per_source.get(source, 0) + 1
+            if len(selected) >= k:
+                return selected
+        else:
+            overflow.append((score, chunk))
+    for score, chunk in overflow:
+        selected.append((score, chunk))
+        if len(selected) >= k:
+            break
+    return selected
+
+
+def _chunk_result(chunk: dict, score: float) -> dict:
+    return {
+        "text": chunk["text"],
+        "source": chunk["source"],
+        "chunk_index": chunk["chunk_index"],
+        "heading": chunk.get("heading"),
+        "score": score,
+    }
+
+
+def _expand_to_source_notes(hits: list[dict], stored_chunks: list[dict]) -> list[dict]:
+    """Replace hit excerpts with every stored chunk from those Notes, grouped by source."""
+    if not hits:
+        return []
+    hit_scores: dict[tuple[str, int], float] = {}
+    sources: list[str] = []
+    seen: set[str] = set()
+    for hit in hits:
+        source = hit.get("source") or ""
+        if source and source not in seen:
+            seen.add(source)
+            sources.append(source)
+        key = (source, int(hit.get("chunk_index") or 0))
+        hit_scores[key] = float(hit.get("score") or 0.0)
+    by_source: dict[str, list[dict]] = {}
+    for chunk in stored_chunks:
+        source = chunk.get("source") or ""
+        if source in seen:
+            by_source.setdefault(source, []).append(chunk)
+    expanded: list[dict] = []
+    for source in sources:
+        siblings = sorted(
+            by_source.get(source, []),
+            key=lambda chunk: int(chunk.get("chunk_index") or 0),
+        )
+        for chunk in siblings:
+            key = (source, int(chunk.get("chunk_index") or 0))
+            expanded.append(_chunk_result(chunk, hit_scores.get(key, 0.0)))
+    return expanded
 
 
 def _cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -494,7 +635,9 @@ def ingest(embedding_model: str | None = None) -> IngestResponse:
     )
 
 
-def search(question: str, top_k: int | None = None) -> list[dict]:
+def search(
+    question: str, top_k: int | None = None, *, expand_notes: bool = False
+) -> list[dict]:
     """Return the top_k most similar chunks for the question."""
     question = (question or "").strip()
     if not question:
@@ -517,32 +660,29 @@ def search(question: str, top_k: int | None = None) -> list[dict]:
     finally:
         settings.embedding_model = previous_model
     query_vector = query_vectors[0]
+    question_tokens = _tokens(question)
 
     scored: list[tuple[float, dict]] = []
     for chunk in stored_chunks:
         embedding = chunk.get("embedding")
         if not embedding:
             continue
-        score = _cosine_similarity(query_vector, embedding)
-        scored.append((score, chunk))
+        cosine = _cosine_similarity(query_vector, embedding)
+        keyword = _keyword_score(question_tokens, chunk)
+        scored.append((_hybrid_score(cosine, keyword), chunk))
     scored.sort(key=lambda item: item[0], reverse=True)
 
     results = [
-        {
-            "text": chunk["text"],
-            "source": chunk["source"],
-            "chunk_index": chunk["chunk_index"],
-            "heading": chunk.get("heading"),
-            "score": score,
-        }
-        for score, chunk in scored[:k]
+        _chunk_result(chunk, score) for score, chunk in _select_diverse(scored, k)
     ]
+    if expand_notes:
+        results = _expand_to_source_notes(results, stored_chunks)
     _print_search_results(question, results)
     return results
 
 
 def build_prompt(question: str, chunks: list[dict]) -> list[dict]:
-    """Return chat messages. Answer only from context; otherwise say you don't know."""
+    """Return chat messages. Grounded comparison from excerpts; otherwise refuse."""
     question = (question or "").strip()
     parts = ["Question:", question or "(empty)", "", "Document excerpts:"]
     if not chunks:
@@ -814,7 +954,7 @@ def ask(question: str, llm_model: str | None = None) -> AskResponse:
     settings.llm_model = model
     try:
         started = time.perf_counter()
-        chunks = search(question)
+        chunks = search(question, expand_notes=True)
         if not chunks:
             answer = "I don't know"
             elapsed_ms = (time.perf_counter() - started) * 1000

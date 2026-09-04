@@ -1,5 +1,5 @@
 {
-  "description": "Hand-write these. Score retrieval (right chunk in top_k) separately from answer quality. Fluent-but-wrong is a fail: the answer must include every must_contain phrase. Refuse cases must say I don't know and attach no citations.",
+  "description": "Hand-write these. Score retrieval (expected sources in top-k) separately from answer quality. Fluent-but-wrong is a fail: the answer must include every must_contain phrase and none of must_not_contain. Refuse cases must say I don't know and attach no citations. Comparison and ranking cases must cite every expected source and must not invent a winner.",
   "questions": [
     {
       "id": "easy-1",
@@ -38,6 +38,39 @@
       "question": "What is the weather in Tokyo tomorrow?",
       "expected_source": null,
       "notes": "Not in the docs. Must refuse / say I don't know. No fake citations.",
+      "should_refuse": true,
+      "must_contain": []
+    },
+    {
+      "id": "compare-1",
+      "question": "who is better? lebron or curry?",
+      "expected_sources": [
+        "docs/nba/lebron-james.md",
+        "docs/nba/stephen-curry.md"
+      ],
+      "notes": "Grounded comparison. Both Notes must be retrieved. Compare documented facts; do not name a winner.",
+      "should_refuse": false,
+      "must_contain": ["lebron", "curry", "four"],
+      "must_not_contain": ["greatest of all time"]
+    },
+    {
+      "id": "rank-1",
+      "question": "who is the best player?",
+      "expected_sources": [
+        "docs/nba/lebron-james.md",
+        "docs/nba/stephen-curry.md",
+        "docs/nba/nikola-jokic.md"
+      ],
+      "notes": "Ranking with no criterion. Retrieve the player Notes, compare documented facts, do not crown a best player.",
+      "should_refuse": false,
+      "must_contain": ["james", "curry", "nuggets"],
+      "must_not_contain": ["greatest of all time"]
+    },
+    {
+      "id": "refuse-2",
+      "question": "Who won the 2024 Super Bowl?",
+      "expected_source": null,
+      "notes": "Not in the docs. Must refuse. No fake citations.",
       "should_refuse": true,
       "must_contain": []
     }
