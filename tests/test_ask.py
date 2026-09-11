@@ -49,11 +49,14 @@ def test_build_prompt_includes_question_chunks_and_refuse_instruction() -> None:
     system = messages[0]["content"].lower()
     assert "only" in system
     assert "i don't know" in system
+    assert "count" in system
+    assert "compare" in system
     user = messages[1]["content"]
     assert "What is Ask My Docs?" in user
     assert "docs/what-ask-my-docs-is.md" in user
     assert "Point the app at markdown files in docs/." in user
     assert "What Ask My Docs is" in user
+    assert "each side" not in user.lower()
 
 
 def test_build_prompt_handles_empty_chunks() -> None:

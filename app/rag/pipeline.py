@@ -3,7 +3,8 @@
 1. load_documents  — read text from settings.docs_dir (done)
 2. chunk_text      — split documents into overlapping chunks with metadata (done)
 3. ingest          — embed chunks and store them locally (done)
-4. search          — embed the question, return top_k chunks (done)
+4. search          — embed the question, return top_k chunks; comparison
+                     questions search each side and cap chunks per source (done)
 5. build_prompt    — system instructions + retrieved context + question (done)
 6. ask_llm         — call the selected provider; temperature 0 (done)
 7. ask             — search → prompt → LLM → citations from chunk metadata (done)
@@ -41,10 +42,48 @@ _GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 _DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions"
 _SYSTEM_PROMPT = (
     "You are Ask My Docs. Answer using only the document excerpts in the user "
-    "message. If they do not contain the answer, reply with exactly: I don't know. "
+    "message. You may count, compare, and rank facts that appear in those "
+    "excerpts even if no excerpt states the conclusion. If the excerpts do not "
+    "contain the facts needed to answer, reply with exactly: I don't know. "
     "Do not use outside knowledge. Do not invent filenames, sources, or facts."
 )
+_COMPARE_USER_HINT = (
+    "If the question compares two or more sides, state the relevant facts for "
+    "each side from the excerpts, then the conclusion. Do not use facts that "
+    "are not in the excerpts."
+)
 _REFUSE_RE = re.compile(r"^\s*i (don't|do not) know\.?\s*$", re.IGNORECASE)
+_PER_SOURCE_CAP = 2
+_COMPARE_CUE_RE = re.compile(
+    r"\b(?:vs\.?|versus|compar(?:e|ed|ing|ison)|difference|both|"
+    r"more|most|less|least|fewer|than)\b",
+    re.IGNORECASE,
+)
+_WHO_MORE_RE = re.compile(
+    r"(?:who|which(?:\s+\w+)?)\s+has\s+(?:the\s+)?"
+    r"(?:more|most|less|least|fewer)\s+"
+    r"(?P<metric>.+?)[,\s]+(?P<a>.+?)\s+or\s+(?P<b>.+?)\s*\??\s*$",
+    re.IGNORECASE,
+)
+_MORE_THAN_RE = re.compile(
+    r"does\s+(?P<a>.+?)\s+have\s+(?:the\s+)?"
+    r"(?:more|most|less|least|fewer)\s+"
+    r"(?P<metric>.+?)\s+than\s+(?P<b>.+?)\s*\??\s*$",
+    re.IGNORECASE,
+)
+_COMPARE_RE = re.compile(
+    r"^(?:please\s+)?compar(?:e|ing)\s+(?P<a>.+?)\s+"
+    r"(?:and|to|with|vs\.?|versus)\s+(?P<b>.+?)\s*\??\s*$",
+    re.IGNORECASE,
+)
+_VS_RE = re.compile(
+    r"^(?P<a>.+?)\s+(?:vs\.?|versus)\s+(?P<b>.+?)\s*\??\s*$",
+    re.IGNORECASE,
+)
+_DIFF_RE = re.compile(
+    r"difference\s+between\s+(?P<a>.+?)\s+and\s+(?P<b>.+?)\s*\??\s*$",
+    re.IGNORECASE,
+)
 _SNIPPET_CHARS = 240
 _OPENAI_EMBED_BATCH_SIZE = 64
 _GEMINI_EMBED_BATCH_SIZE = 100
@@ -494,19 +533,83 @@ def ingest(embedding_model: str | None = None) -> IngestResponse:
     )
 
 
-def search(question: str, top_k: int | None = None) -> list[dict]:
-    """Return the top_k most similar chunks for the question."""
-    question = (question or "").strip()
-    if not question:
-        raise ValueError("Question must not be empty.")
-    k = settings.top_k if top_k is None else top_k
-    if k < 1:
-        raise ValueError("top_k must be at least 1.")
+def _clean_span(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    cleaned = cleaned.strip("?.!,;:\"'()[]")
+    cleaned = re.sub(r"^(?:the|a|an)\s+", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
 
+
+def _valid_side(text: str) -> bool:
+    return bool(text) and len(text) <= 80 and "?" not in text
+
+
+def _parse_comparison(question: str) -> tuple[list[str], str] | None:
+    """Return (sides, metric) for a comparison question, or None."""
+    if not _COMPARE_CUE_RE.search(question):
+        return None
+    for pattern in (
+        _WHO_MORE_RE,
+        _MORE_THAN_RE,
+        _COMPARE_RE,
+        _DIFF_RE,
+        _VS_RE,
+    ):
+        match = pattern.search(question)
+        if not match:
+            continue
+        groups = match.groupdict()
+        left = _clean_span(groups.get("a") or "")
+        right = _clean_span(groups.get("b") or "")
+        metric = _clean_span(groups.get("metric") or "")
+        if not _valid_side(left) or not _valid_side(right):
+            continue
+        if left.lower() == right.lower():
+            continue
+        return [left, right], metric
+    return None
+
+
+def _comparison_queries(question: str) -> list[str] | None:
+    """Return per-side search queries, or None when this is not a comparison."""
+    parsed = _parse_comparison(question)
+    if parsed is None:
+        return None
+    sides, metric = parsed
+    if metric:
+        return [f"{side} {metric}" for side in sides]
+    return list(sides)
+
+
+def _merge_comparison_chunks(groups: list[list[dict]]) -> list[dict]:
+    """Interleave per-side hits and cap how many chunks each source may contribute."""
+    seen: set[tuple[str, int]] = set()
+    source_counts: dict[str, int] = {}
+    merged: list[dict] = []
+    max_len = max((len(group) for group in groups), default=0)
+    for index in range(max_len):
+        for group in groups:
+            if index >= len(group):
+                continue
+            chunk = group[index]
+            source = str(chunk.get("source") or "")
+            raw_index = chunk.get("chunk_index")
+            chunk_index = int(raw_index) if raw_index is not None else index
+            key = (source, chunk_index)
+            if key in seen:
+                continue
+            if source_counts.get(source, 0) >= _PER_SOURCE_CAP:
+                continue
+            seen.add(key)
+            source_counts[source] = source_counts.get(source, 0) + 1
+            merged.append(chunk)
+    return merged
+
+
+def _search_similar(question: str, top_k: int) -> list[dict]:
     payload = _read_index()
     stored_chunks = payload["chunks"]
     if not stored_chunks:
-        _print_search_results(question, [])
         return []
 
     model = payload.get("embedding_model") or settings.embedding_model
@@ -527,7 +630,7 @@ def search(question: str, top_k: int | None = None) -> list[dict]:
         scored.append((score, chunk))
     scored.sort(key=lambda item: item[0], reverse=True)
 
-    results = [
+    return [
         {
             "text": chunk["text"],
             "source": chunk["source"],
@@ -535,16 +638,43 @@ def search(question: str, top_k: int | None = None) -> list[dict]:
             "heading": chunk.get("heading"),
             "score": score,
         }
-        for score, chunk in scored[:k]
+        for score, chunk in scored[:top_k]
     ]
+
+
+def search(question: str, top_k: int | None = None) -> list[dict]:
+    """Return the top_k most similar chunks for the question.
+
+    Comparison questions search each named side separately, then merge hits
+    with a per-source cap so one document cannot fill the window.
+    """
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("Question must not be empty.")
+    k = settings.top_k if top_k is None else top_k
+    if k < 1:
+        raise ValueError("top_k must be at least 1.")
+
+    queries = _comparison_queries(question)
+    if queries:
+        results = _merge_comparison_chunks(
+            [_search_similar(query, k) for query in queries]
+        )
+    else:
+        results = _search_similar(question, k)
     _print_search_results(question, results)
     return results
 
 
-def build_prompt(question: str, chunks: list[dict]) -> list[dict]:
+def build_prompt(
+    question: str, chunks: list[dict], *, compare: bool = False
+) -> list[dict]:
     """Return chat messages. Answer only from context; otherwise say you don't know."""
     question = (question or "").strip()
-    parts = ["Question:", question or "(empty)", "", "Document excerpts:"]
+    parts = ["Question:", question or "(empty)", ""]
+    if compare:
+        parts.extend([_COMPARE_USER_HINT, ""])
+    parts.append("Document excerpts:")
     if not chunks:
         parts.append("(none)")
     else:
@@ -821,7 +951,8 @@ def ask(question: str, llm_model: str | None = None) -> AskResponse:
             _print_ask_result(question, answer, [], elapsed_ms)
             return AskResponse(answer=answer, citations=[], llm_model=model)
 
-        messages = build_prompt(question, chunks)
+        compare = _comparison_queries(question) is not None
+        messages = build_prompt(question, chunks, compare=compare)
         answer, usage = _ask_llm(messages)
         citations = [] if _looks_like_refuse(answer) else _citations_from_chunks(chunks)
         elapsed_ms = (time.perf_counter() - started) * 1000

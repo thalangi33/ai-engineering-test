@@ -5,6 +5,7 @@ import pytest
 
 from app.models import AskResponse, Citation
 from evals.score import (
+    case_expected_sources,
     evaluate_all,
     evaluate_case,
     format_report,
@@ -32,13 +33,26 @@ def _case(**overrides):
 def test_load_cases_from_repo() -> None:
     cases = load_cases()
     ids = [case["id"] for case in cases]
-    assert ids == ["easy-1", "easy-2", "easy-3", "paraphrase-1", "refuse-1"]
+    assert ids == [
+        "easy-1",
+        "easy-2",
+        "easy-3",
+        "paraphrase-1",
+        "refuse-1",
+        "compare-1",
+        "compare-refuse-1",
+    ]
     refuse = next(case for case in cases if case["id"] == "refuse-1")
     assert refuse["should_refuse"] is True
     assert refuse["expected_source"] is None
+    compare = next(case for case in cases if case["id"] == "compare-1")
+    assert compare["expected_sources"] == [
+        "docs/nba/lebron-james.md",
+        "docs/nba/stephen-curry.md",
+    ]
     for case in cases:
         if not case["should_refuse"]:
-            assert case["expected_source"]
+            assert case.get("expected_source") or case.get("expected_sources")
             assert case["must_contain"]
 
 
@@ -63,6 +77,68 @@ def test_score_retrieval_pass_and_fail() -> None:
     failed, detail = score_retrieval(case, [{"source": "docs/nba/lebron-james.md"}])
     assert failed is False
     assert "not in top-" in detail
+
+
+def test_score_retrieval_requires_all_expected_sources() -> None:
+    case = _case(
+        id="compare-1",
+        question="Who has more titles, LeBron or Curry?",
+        expected_source=None,
+        expected_sources=[
+            "docs/nba/lebron-james.md",
+            "docs/nba/stephen-curry.md",
+        ],
+        must_contain=["LeBron", "Curry", "four"],
+    )
+    assert case_expected_sources(case) == [
+        "docs/nba/lebron-james.md",
+        "docs/nba/stephen-curry.md",
+    ]
+    both, detail = score_retrieval(
+        case,
+        [
+            {"source": "docs/nba/lebron-james.md"},
+            {"source": "docs/nba/stephen-curry.md"},
+        ],
+    )
+    assert both is True
+    assert "lebron-james.md" in detail
+    assert "stephen-curry.md" in detail
+
+    one_side, detail = score_retrieval(
+        case, [{"source": "docs/nba/lebron-james.md"}]
+    )
+    assert one_side is False
+    assert "stephen-curry.md" in detail
+
+
+def test_score_answer_requires_all_expected_source_citations() -> None:
+    case = _case(
+        id="compare-1",
+        expected_source=None,
+        expected_sources=[
+            "docs/nba/lebron-james.md",
+            "docs/nba/stephen-curry.md",
+        ],
+        must_contain=["LeBron", "Curry", "four"],
+    )
+    passed, _ = score_answer(
+        case,
+        "LeBron has four titles and Curry has four, so they are tied.",
+        [
+            Citation(source="docs/nba/lebron-james.md", snippet="four"),
+            Citation(source="docs/nba/stephen-curry.md", snippet="four"),
+        ],
+    )
+    assert passed is True
+
+    missing_side, detail = score_answer(
+        case,
+        "LeBron has four titles and Curry has four, so they are tied.",
+        [Citation(source="docs/nba/lebron-james.md", snippet="four")],
+    )
+    assert missing_side is False
+    assert "stephen-curry.md" in detail
 
 
 def test_score_retrieval_skipped_for_refuse() -> None:
