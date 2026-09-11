@@ -17,7 +17,7 @@ from app.rag import pipeline
 router = APIRouter()
 
 _NOT_IMPLEMENTED = (
-    "RAG is not implemented yet. Fill in the stubs in app/rag/pipeline.py."
+    "RAG is not implemented yet. Fill in the stubs in app/rag/."
 )
 
 

@@ -40,6 +40,25 @@
       "notes": "Not in the docs. Must refuse / say I don't know. No fake citations.",
       "should_refuse": true,
       "must_contain": []
+    },
+    {
+      "id": "compare-1",
+      "question": "Who has more titles, LeBron or Curry?",
+      "expected_sources": [
+        "docs/nba/lebron-james.md",
+        "docs/nba/stephen-curry.md"
+      ],
+      "notes": "Each bio lists four titles; no file states the comparison. Retrieve both sides and synthesize a tie.",
+      "should_refuse": false,
+      "must_contain": ["LeBron", "Curry", "four"]
+    },
+    {
+      "id": "compare-refuse-1",
+      "question": "Who has more Super Bowls, Brady or Mahomes?",
+      "expected_source": null,
+      "notes": "Comparison shape, but neither side is in the docs. Must refuse with no citations.",
+      "should_refuse": true,
+      "must_contain": []
     }
   ]
 }

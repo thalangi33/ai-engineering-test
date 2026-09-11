@@ -78,17 +78,30 @@ def missing_phrases(text: str, phrases: list[str] | None) -> list[str]:
     return missing
 
 
+def case_expected_sources(case: dict[str, Any]) -> list[str]:
+    raw = case.get("expected_sources")
+    if isinstance(raw, list) and raw:
+        return [str(item) for item in raw if item]
+    one = case.get("expected_source")
+    if one:
+        return [str(one)]
+    return []
+
+
 def score_retrieval(
     case: dict[str, Any], chunks: list[dict[str, Any]]
 ) -> tuple[bool | None, str]:
-    expected = case.get("expected_source")
+    wanted = case_expected_sources(case)
     sources = [str(chunk.get("source") or "") for chunk in chunks]
-    if case.get("should_refuse") or not expected:
+    if case.get("should_refuse") or not wanted:
         return None, "n/a (no expected source)"
-    if source_in(expected, sources):
-        return True, f"found {expected} in top-{len(chunks)}"
+    missing = [item for item in wanted if not source_in(item, sources)]
+    if not missing:
+        joined = ", ".join(wanted)
+        return True, f"found {joined} in top-{len(chunks)}"
     listed = ", ".join(sources) if sources else "(none)"
-    return False, f"{expected} not in top-{len(chunks)}: {listed}"
+    missing_joined = ", ".join(missing)
+    return False, f"{missing_joined} not in top-{len(chunks)}: {listed}"
 
 
 def score_answer(
@@ -109,10 +122,11 @@ def score_answer(
         return False, "refused but the answer is in the docs"
     if not (answer or "").strip():
         return False, "empty answer"
-    expected = case.get("expected_source")
-    if expected and not source_in(expected, sources):
-        listed = ", ".join(sources) if sources else "(none)"
-        return False, f"missing citation {expected}: {listed}"
+    wanted = case_expected_sources(case)
+    for expected in wanted:
+        if not source_in(expected, sources):
+            listed = ", ".join(sources) if sources else "(none)"
+            return False, f"missing citation {expected}: {listed}"
     missing = missing_phrases(answer, case.get("must_contain") or [])
     if missing:
         return False, "fluent-but-wrong; missing: " + ", ".join(missing)
