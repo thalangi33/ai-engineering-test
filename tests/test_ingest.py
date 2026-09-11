@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import app.rag.embeddings as embeddings
 import app.rag.pipeline as pipeline
 from app.config import settings
 from app.rag.pipeline import chunk_text, ingest, load_documents
@@ -235,7 +236,7 @@ def test_embed_texts_minilm_does_not_need_api_key(
     monkeypatch.setattr(settings, "embedding_model", "all-MiniLM-L6-v2")
     monkeypatch.setattr(settings, "llm_api_key", "")
     monkeypatch.setattr(settings, "gemini_api_key", "")
-    monkeypatch.setattr(pipeline, "_load_minilm", lambda: _FakeMiniLM())
+    monkeypatch.setattr(embeddings, "_load_minilm", lambda: _FakeMiniLM())
     assert pipeline._embed_texts(["hello", "world"]) == [[1.0, 0.5], [2.0, 0.5]]
 
 
@@ -245,5 +246,5 @@ def test_embed_texts_minilm_accepts_hf_model_id(
     monkeypatch.setattr(
         settings, "embedding_model", "sentence-transformers/all-MiniLM-L6-v2"
     )
-    monkeypatch.setattr(pipeline, "_load_minilm", lambda: _FakeMiniLM())
+    monkeypatch.setattr(embeddings, "_load_minilm", lambda: _FakeMiniLM())
     assert pipeline._embed_texts(["hello"]) == [[1.0, 0.5]]

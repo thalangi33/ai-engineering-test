@@ -1,291 +1,48 @@
-"""RAG pipeline.
+"""RAG pipeline orchestrator.
 
-1. load_documents  — read text from settings.docs_dir (done)
-2. chunk_text      — split documents into overlapping chunks with metadata (done)
-3. ingest          — embed chunks and store them locally (done)
-4. search          — embed the question, return top_k chunks; comparison
-                     questions search each side and cap chunks per source (done)
-5. build_prompt    — system instructions + retrieved context + question (done)
-6. ask_llm         — call the selected provider; temperature 0 (done)
-7. ask             — search → prompt → LLM → citations from chunk metadata (done)
+Sibling modules own the steps:
 
-Search still prints retrieved chunks so retrieval can be checked before trusting answers.
-Citations come from retrieved chunk metadata, not from the model inventing filenames.
+- documents  — load_documents, chunk_text
+- embeddings — embed chunks and queries
+- index      — local JSON store and cosine similarity
+- compare    — split comparison questions and merge hits
+- prompt     — grounded messages, refuse, citations
+- chat       — Gemini, Ollama, Groq, DeepSeek
+
+ingest / search / ask stay here so routes and tests keep importing this module.
+Search still prints retrieved chunks. Citations come from chunk metadata.
 """
 
-import json
-import math
-import re
 import time
-from pathlib import Path
-from typing import NoReturn
 
 import httpx
 
-from app.config import PROJECT_ROOT, settings
-from app.models import (
-    AskResponse,
-    ChatModelsResponse,
-    Citation,
-    EmbeddingModelsResponse,
-    IngestResponse,
+from app.config import settings
+from app.models import AskResponse, Citation, IngestResponse
+from app.rag.chat import _ask_llm, _chat_backend, ask_llm, list_chat_models
+from app.rag.compare import _comparison_queries, _merge_comparison_chunks
+from app.rag.documents import chunk_text, load_documents
+from app.rag.embeddings import (
+    _OPENAI_EMBEDDINGS_URL,
+    _embed_texts,
+    _embedding_backend,
+    list_embedding_models,
 )
+from app.rag.index import _cosine_similarity, _read_index, _write_index
+from app.rag.prompt import _citations_from_chunks, _looks_like_refuse, build_prompt
 
-_ALLOWED_SUFFIXES = {".md", ".txt"}
-_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-# Rough char stand-in for tokens (~4 chars/token): ~500 target, ~800 max, ~80 overlap.
-_TARGET_CHARS = 2000
-_MAX_CHARS = 3200
-_OVERLAP_CHARS = 320
-_OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
-_GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
-_DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions"
-_SYSTEM_PROMPT = (
-    "You are Ask My Docs. Answer using only the document excerpts in the user "
-    "message. You may count, compare, and rank facts that appear in those "
-    "excerpts even if no excerpt states the conclusion. If the excerpts do not "
-    "contain the facts needed to answer, reply with exactly: I don't know. "
-    "Do not use outside knowledge. Do not invent filenames, sources, or facts."
-)
-_COMPARE_USER_HINT = (
-    "If the question compares two or more sides, state the relevant facts for "
-    "each side from the excerpts, then the conclusion. Do not use facts that "
-    "are not in the excerpts."
-)
-_REFUSE_RE = re.compile(r"^\s*i (don't|do not) know\.?\s*$", re.IGNORECASE)
-_PER_SOURCE_CAP = 2
-_COMPARE_CUE_RE = re.compile(
-    r"\b(?:vs\.?|versus|compar(?:e|ed|ing|ison)|difference|both|"
-    r"more|most|less|least|fewer|than)\b",
-    re.IGNORECASE,
-)
-_WHO_MORE_RE = re.compile(
-    r"(?:who|which(?:\s+\w+)?)\s+has\s+(?:the\s+)?"
-    r"(?:more|most|less|least|fewer)\s+"
-    r"(?P<metric>.+?)[,\s]+(?P<a>.+?)\s+or\s+(?P<b>.+?)\s*\??\s*$",
-    re.IGNORECASE,
-)
-_MORE_THAN_RE = re.compile(
-    r"does\s+(?P<a>.+?)\s+have\s+(?:the\s+)?"
-    r"(?:more|most|less|least|fewer)\s+"
-    r"(?P<metric>.+?)\s+than\s+(?P<b>.+?)\s*\??\s*$",
-    re.IGNORECASE,
-)
-_COMPARE_RE = re.compile(
-    r"^(?:please\s+)?compar(?:e|ing)\s+(?P<a>.+?)\s+"
-    r"(?:and|to|with|vs\.?|versus)\s+(?P<b>.+?)\s*\??\s*$",
-    re.IGNORECASE,
-)
-_VS_RE = re.compile(
-    r"^(?P<a>.+?)\s+(?:vs\.?|versus)\s+(?P<b>.+?)\s*\??\s*$",
-    re.IGNORECASE,
-)
-_DIFF_RE = re.compile(
-    r"difference\s+between\s+(?P<a>.+?)\s+and\s+(?P<b>.+?)\s*\??\s*$",
-    re.IGNORECASE,
-)
-_SNIPPET_CHARS = 240
-_OPENAI_EMBED_BATCH_SIZE = 64
-_GEMINI_EMBED_BATCH_SIZE = 100
-_OPENAI_EMBED_MODELS = {"text-embedding-3-small"}
-_GEMINI_EMBED_MODELS = {"gemini-embedding-001"}
-_LOCAL_EMBED_MODELS = {"all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2"}
-_MINILM_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
-_EMBEDDING_MODEL_CHOICES = (
-    ("text-embedding-3-small", "OpenAI · text-embedding-3-small"),
-    ("gemini-embedding-001", "Gemini · gemini-embedding-001"),
-    ("all-MiniLM-L6-v2", "Local · all-MiniLM-L6-v2"),
-)
-_GEMINI_CHAT_MODELS = {"gemini-2.0-flash"}
-_OLLAMA_CHAT_MODELS = {"llama3.2", "llama3.2:3b"}
-_GROQ_CHAT_MODELS = {"llama-3.1-8b-instant"}
-_DEEPSEEK_CHAT_MODELS = {"deepseek-v4-flash"}
-_CHAT_MODEL_CHOICES = (
-    ("gemini-2.0-flash", "Gemini · gemini-2.0-flash"),
-    ("llama3.2", "Ollama · llama3.2 (3B)"),
-    ("llama-3.1-8b-instant", "Groq · llama-3.1-8b-instant"),
-    ("deepseek-v4-flash", "DeepSeek · deepseek-v4-flash"),
-)
-
-_minilm_model = None
-
-
-def load_documents(docs_dir: Path) -> list[dict]:
-    """Return a list of {path, text} dicts for markdown/text files under docs_dir."""
-    docs_dir = Path(docs_dir).expanduser().resolve()
-    if not docs_dir.is_dir():
-        raise FileNotFoundError(f"Docs directory not found: {docs_dir}")
-
-    documents: list[dict] = []
-    for path in sorted(docs_dir.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in _ALLOWED_SUFFIXES:
-            continue
-        text = path.read_text(encoding="utf-8")
-        try:
-            stored_path = path.relative_to(PROJECT_ROOT).as_posix()
-        except ValueError:
-            stored_path = path.as_posix()
-        documents.append({"path": stored_path, "text": text})
-    return documents
-
-
-def _split_into_sections(text: str) -> list[tuple[str | None, str]]:
-    """Split markdown into (heading, section_text) pairs. Heading may be None."""
-    sections: list[tuple[str | None, str]] = []
-    heading: str | None = None
-    buf: list[str] = []
-
-    def flush() -> None:
-        nonlocal heading, buf
-        body = "".join(buf).strip()
-        if body:
-            sections.append((heading, body))
-        buf = []
-
-    for line in text.splitlines(keepends=True):
-        match = _HEADING_RE.match(line.rstrip("\n"))
-        if match:
-            flush()
-            heading = match.group(2).strip()
-            buf = [line]
-        else:
-            buf.append(line)
-    flush()
-    return sections
-
-
-def _overlap_tail(text: str) -> str:
-    if len(text) <= _OVERLAP_CHARS:
-        return text
-    tail = text[-_OVERLAP_CHARS:]
-    space = tail.find(" ")
-    if space != -1:
-        tail = tail[space + 1 :]
-    return tail.strip()
-
-
-def _split_long_paragraph(text: str) -> list[str]:
-    parts: list[str] = []
-    start = 0
-    length = len(text)
-    while start < length:
-        end = min(start + _TARGET_CHARS, length)
-        if end < length:
-            cut = text.rfind(" ", start, end)
-            if cut > start:
-                end = cut
-        piece = text[start:end].strip()
-        if piece:
-            parts.append(piece)
-        if end >= length:
-            break
-        start = end
-        while start < length and text[start] == " ":
-            start += 1
-    return parts or [text]
-
-
-def _pack_paragraphs(paragraphs: list[str]) -> list[str]:
-    units: list[str] = []
-    for paragraph in paragraphs:
-        if len(paragraph) > _MAX_CHARS:
-            units.extend(_split_long_paragraph(paragraph))
-        else:
-            units.append(paragraph)
-
-    packed: list[str] = []
-    buf = ""
-    for unit in units:
-        candidate = f"{buf}\n\n{unit}" if buf else unit
-        if buf and len(candidate) > _TARGET_CHARS:
-            packed.append(buf)
-            tail = _overlap_tail(buf)
-            buf = f"{tail}\n\n{unit}" if tail else unit
-        else:
-            buf = candidate
-    if buf:
-        packed.append(buf)
-    return packed
-
-
-def chunk_text(documents: list[dict]) -> list[dict]:
-    """Return chunks with text plus metadata (source, chunk_index, heading)."""
-    chunks: list[dict] = []
-    for document in documents:
-        text = (document.get("text") or "").strip()
-        if not text:
-            continue
-        source = document["path"]
-        chunk_index = 0
-        for heading, section in _split_into_sections(text):
-            paragraphs = [
-                part.strip() for part in re.split(r"\n\s*\n", section) if part.strip()
-            ]
-            if not paragraphs:
-                continue
-            for part in _pack_paragraphs(paragraphs):
-                chunks.append(
-                    {
-                        "text": part,
-                        "source": source,
-                        "chunk_index": chunk_index,
-                        "heading": heading,
-                    }
-                )
-                chunk_index += 1
-    return chunks
-
-
-def _resolved_index_path() -> Path:
-    path = Path(settings.index_path).expanduser()
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    return path
-
-
-def _write_index(payload: dict) -> Path:
-    path = _resolved_index_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(path.name + ".tmp")
-    tmp_path.write_text(json.dumps(payload), encoding="utf-8")
-    tmp_path.replace(path)
-    return path
-
-
-def _read_index() -> dict:
-    path = _resolved_index_path()
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"Vector index not found: {path}. Run ingest before search."
-        )
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Vector index is not valid JSON: {path}") from exc
-    if not isinstance(payload, dict) or "chunks" not in payload:
-        raise ValueError("Vector index is missing a chunks list. Re-run ingest.")
-    chunks = payload["chunks"]
-    if not isinstance(chunks, list):
-        raise ValueError("Vector index is missing a chunks list. Re-run ingest.")
-    return payload
-
-
-def _cosine_similarity(left: list[float], right: list[float]) -> float:
-    if len(left) != len(right):
-        raise ValueError(
-            "Embedding dimension mismatch: "
-            f"query has {len(left)} dims, chunk has {len(right)}. Re-run ingest."
-        )
-    dot = 0.0
-    norm_left = 0.0
-    norm_right = 0.0
-    for x, y in zip(left, right, strict=True):
-        dot += x * y
-        norm_left += x * x
-        norm_right += y * y
-    if norm_left == 0.0 or norm_right == 0.0:
-        return 0.0
-    return dot / (math.sqrt(norm_left) * math.sqrt(norm_right))
+# Re-exported for tests and evals that import these names from pipeline.
+__all__ = [
+    "ask",
+    "ask_llm",
+    "build_prompt",
+    "chunk_text",
+    "ingest",
+    "list_chat_models",
+    "list_embedding_models",
+    "load_documents",
+    "search",
+]
 
 
 def _print_search_results(question: str, results: list[dict]) -> None:
@@ -301,190 +58,25 @@ def _print_search_results(question: str, results: list[dict]) -> None:
         )
 
 
-def _embedding_backend(model: str) -> str:
-    if model in _OPENAI_EMBED_MODELS:
-        return "openai"
-    if model in _GEMINI_EMBED_MODELS:
-        return "gemini"
-    if model in _LOCAL_EMBED_MODELS:
-        return "local"
-    raise ValueError(
-        f"Unsupported embedding model {model!r}. Choose one of: "
-        "text-embedding-3-small, gemini-embedding-001, all-MiniLM-L6-v2."
+def _print_ask_result(
+    question: str,
+    answer: str,
+    citations: list[Citation],
+    elapsed_ms: float,
+    usage: dict | None = None,
+) -> None:
+    sources = ", ".join(citation.source for citation in citations) or "(none)"
+    usage_part = ""
+    if usage:
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        if prompt_tokens is not None and completion_tokens is not None:
+            usage_part = f" tokens={prompt_tokens}+{completion_tokens}"
+    print(
+        f"[ask] {question!r} → {elapsed_ms:.0f}ms{usage_part}\n"
+        f"  citations: {sources}\n"
+        f"  answer: {answer}"
     )
-
-
-def list_embedding_models() -> EmbeddingModelsResponse:
-    selected = settings.embedding_model
-    if selected in _LOCAL_EMBED_MODELS:
-        selected = "all-MiniLM-L6-v2"
-    return EmbeddingModelsResponse(
-        models=[
-            {"id": model_id, "label": label}
-            for model_id, label in _EMBEDDING_MODEL_CHOICES
-        ],
-        selected=selected,
-    )
-
-
-def _chat_backend(model: str) -> str:
-    if model in _GEMINI_CHAT_MODELS:
-        return "gemini"
-    if model in _OLLAMA_CHAT_MODELS:
-        return "ollama"
-    if model in _GROQ_CHAT_MODELS:
-        return "groq"
-    if model in _DEEPSEEK_CHAT_MODELS:
-        return "deepseek"
-    raise ValueError(
-        f"Unsupported chat model {model!r}. Choose one of: "
-        "gemini-2.0-flash, llama3.2, llama-3.1-8b-instant, deepseek-v4-flash."
-    )
-
-
-def list_chat_models() -> ChatModelsResponse:
-    ids = [model_id for model_id, _label in _CHAT_MODEL_CHOICES]
-    selected = settings.llm_model
-    if selected in _OLLAMA_CHAT_MODELS:
-        selected = "llama3.2"
-    if selected not in ids:
-        selected = ids[0]
-    return ChatModelsResponse(
-        models=[
-            {"id": model_id, "label": label}
-            for model_id, label in _CHAT_MODEL_CHOICES
-        ],
-        selected=selected,
-    )
-
-
-def _raise_http_error(exc: httpx.HTTPError, what: str) -> NoReturn:
-    if isinstance(exc, httpx.HTTPStatusError):
-        detail = exc.response.text.strip() or exc.response.reason_phrase
-        raise RuntimeError(
-            f"{what} failed ({exc.response.status_code}): {detail}"
-        ) from exc
-    raise RuntimeError(f"{what} failed: {exc}") from exc
-
-
-def _raise_embed_http_error(exc: httpx.HTTPError) -> NoReturn:
-    _raise_http_error(exc, "Embedding request")
-
-
-def _embed_openai(texts: list[str]) -> list[list[float]]:
-    api_key = (settings.llm_api_key or "").strip()
-    if not api_key:
-        raise ValueError("LLM_API_KEY is required to embed documents.")
-
-    vectors: list[list[float] | None] = [None] * len(texts)
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            for start in range(0, len(texts), _OPENAI_EMBED_BATCH_SIZE):
-                batch = texts[start : start + _OPENAI_EMBED_BATCH_SIZE]
-                response = client.post(
-                    _OPENAI_EMBEDDINGS_URL,
-                    headers=headers,
-                    json={"model": settings.embedding_model, "input": batch},
-                )
-                response.raise_for_status()
-                for item in response.json()["data"]:
-                    vectors[start + item["index"]] = item["embedding"]
-    except httpx.HTTPError as exc:
-        _raise_embed_http_error(exc)
-
-    if any(vector is None for vector in vectors):
-        raise RuntimeError("Embedding response was missing one or more vectors.")
-    return [vector for vector in vectors if vector is not None]
-
-
-def _embed_gemini(texts: list[str], *, for_query: bool = False) -> list[list[float]]:
-    api_key = (settings.gemini_api_key or "").strip()
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is required to embed documents.")
-
-    model = settings.embedding_model
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:batchEmbedContents"
-    )
-    task_type = "RETRIEVAL_QUERY" if for_query else "RETRIEVAL_DOCUMENT"
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": api_key,
-    }
-    vectors: list[list[float]] = []
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            for start in range(0, len(texts), _GEMINI_EMBED_BATCH_SIZE):
-                batch = texts[start : start + _GEMINI_EMBED_BATCH_SIZE]
-                response = client.post(
-                    url,
-                    headers=headers,
-                    json={
-                        "requests": [
-                            {
-                                "model": f"models/{model}",
-                                "taskType": task_type,
-                                "content": {"parts": [{"text": text}]},
-                            }
-                            for text in batch
-                        ]
-                    },
-                )
-                response.raise_for_status()
-                items = response.json().get("embeddings") or []
-                if len(items) != len(batch):
-                    raise RuntimeError(
-                        "Embedding response was missing one or more vectors."
-                    )
-                for item in items:
-                    values = item.get("values")
-                    if not values:
-                        raise RuntimeError(
-                            "Embedding response was missing one or more vectors."
-                        )
-                    vectors.append(values)
-    except httpx.HTTPError as exc:
-        _raise_embed_http_error(exc)
-    return vectors
-
-
-def _load_minilm():
-    global _minilm_model
-    if _minilm_model is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as exc:
-            raise RuntimeError(
-                "sentence-transformers is required for all-MiniLM-L6-v2. "
-                "Install it with: pip install sentence-transformers"
-            ) from exc
-        _minilm_model = SentenceTransformer(_MINILM_MODEL_ID)
-    return _minilm_model
-
-
-def _embed_local(texts: list[str]) -> list[list[float]]:
-    model = _load_minilm()
-    encoded = model.encode(texts, normalize_embeddings=True)
-    return [[float(value) for value in row] for row in encoded]
-
-
-def _embed_texts(
-    texts: list[str], *, for_query: bool = False
-) -> list[list[float]]:
-    """Return one embedding vector per text using the configured model."""
-    if not texts:
-        return []
-    backend = _embedding_backend(settings.embedding_model)
-    if backend == "openai":
-        return _embed_openai(texts)
-    if backend == "gemini":
-        return _embed_gemini(texts, for_query=for_query)
-    return _embed_local(texts)
 
 
 def ingest(embedding_model: str | None = None) -> IngestResponse:
@@ -531,79 +123,6 @@ def ingest(embedding_model: str | None = None) -> IngestResponse:
         chunk_count=len(stored),
         embedding_model=model,
     )
-
-
-def _clean_span(text: str) -> str:
-    cleaned = re.sub(r"\s+", " ", (text or "").strip())
-    cleaned = cleaned.strip("?.!,;:\"'()[]")
-    cleaned = re.sub(r"^(?:the|a|an)\s+", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip()
-
-
-def _valid_side(text: str) -> bool:
-    return bool(text) and len(text) <= 80 and "?" not in text
-
-
-def _parse_comparison(question: str) -> tuple[list[str], str] | None:
-    """Return (sides, metric) for a comparison question, or None."""
-    if not _COMPARE_CUE_RE.search(question):
-        return None
-    for pattern in (
-        _WHO_MORE_RE,
-        _MORE_THAN_RE,
-        _COMPARE_RE,
-        _DIFF_RE,
-        _VS_RE,
-    ):
-        match = pattern.search(question)
-        if not match:
-            continue
-        groups = match.groupdict()
-        left = _clean_span(groups.get("a") or "")
-        right = _clean_span(groups.get("b") or "")
-        metric = _clean_span(groups.get("metric") or "")
-        if not _valid_side(left) or not _valid_side(right):
-            continue
-        if left.lower() == right.lower():
-            continue
-        return [left, right], metric
-    return None
-
-
-def _comparison_queries(question: str) -> list[str] | None:
-    """Return per-side search queries, or None when this is not a comparison."""
-    parsed = _parse_comparison(question)
-    if parsed is None:
-        return None
-    sides, metric = parsed
-    if metric:
-        return [f"{side} {metric}" for side in sides]
-    return list(sides)
-
-
-def _merge_comparison_chunks(groups: list[list[dict]]) -> list[dict]:
-    """Interleave per-side hits and cap how many chunks each source may contribute."""
-    seen: set[tuple[str, int]] = set()
-    source_counts: dict[str, int] = {}
-    merged: list[dict] = []
-    max_len = max((len(group) for group in groups), default=0)
-    for index in range(max_len):
-        for group in groups:
-            if index >= len(group):
-                continue
-            chunk = group[index]
-            source = str(chunk.get("source") or "")
-            raw_index = chunk.get("chunk_index")
-            chunk_index = int(raw_index) if raw_index is not None else index
-            key = (source, chunk_index)
-            if key in seen:
-                continue
-            if source_counts.get(source, 0) >= _PER_SOURCE_CAP:
-                continue
-            seen.add(key)
-            source_counts[source] = source_counts.get(source, 0) + 1
-            merged.append(chunk)
-    return merged
 
 
 def _search_similar(question: str, top_k: int) -> list[dict]:
@@ -664,267 +183,6 @@ def search(question: str, top_k: int | None = None) -> list[dict]:
         results = _search_similar(question, k)
     _print_search_results(question, results)
     return results
-
-
-def build_prompt(
-    question: str, chunks: list[dict], *, compare: bool = False
-) -> list[dict]:
-    """Return chat messages. Answer only from context; otherwise say you don't know."""
-    question = (question or "").strip()
-    parts = ["Question:", question or "(empty)", ""]
-    if compare:
-        parts.extend([_COMPARE_USER_HINT, ""])
-    parts.append("Document excerpts:")
-    if not chunks:
-        parts.append("(none)")
-    else:
-        for index, chunk in enumerate(chunks, start=1):
-            source = chunk.get("source") or "unknown"
-            heading = chunk.get("heading")
-            header = f"[{index}] {source}"
-            if heading:
-                header += f" — {heading}"
-            parts.append(header)
-            parts.append((chunk.get("text") or "").strip())
-            parts.append("")
-    return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": "\n".join(parts).strip()},
-    ]
-
-
-def _citation_snippet(text: str) -> str | None:
-    snippet = " ".join((text or "").split())
-    if not snippet:
-        return None
-    if len(snippet) > _SNIPPET_CHARS:
-        return snippet[: _SNIPPET_CHARS - 3] + "..."
-    return snippet
-
-
-def _citations_from_chunks(chunks: list[dict]) -> list[Citation]:
-    citations: list[Citation] = []
-    seen: set[str] = set()
-    for chunk in chunks:
-        source = chunk.get("source")
-        if not source or source in seen:
-            continue
-        seen.add(source)
-        citations.append(
-            Citation(source=source, snippet=_citation_snippet(chunk.get("text") or ""))
-        )
-    return citations
-
-
-def _looks_like_refuse(answer: str) -> bool:
-    return bool(_REFUSE_RE.match(answer or ""))
-
-
-def _print_ask_result(
-    question: str,
-    answer: str,
-    citations: list[Citation],
-    elapsed_ms: float,
-    usage: dict | None = None,
-) -> None:
-    sources = ", ".join(citation.source for citation in citations) or "(none)"
-    usage_part = ""
-    if usage:
-        prompt_tokens = usage.get("prompt_tokens")
-        completion_tokens = usage.get("completion_tokens")
-        if prompt_tokens is not None and completion_tokens is not None:
-            usage_part = f" tokens={prompt_tokens}+{completion_tokens}"
-    print(
-        f"[ask] {question!r} → {elapsed_ms:.0f}ms{usage_part}\n"
-        f"  citations: {sources}\n"
-        f"  answer: {answer}"
-    )
-
-
-def ask_llm(messages: list[dict]) -> str:
-    """Send messages to the LLM and return the assistant text."""
-    return _ask_llm(messages)[0]
-
-
-def _ask_llm(messages: list[dict]) -> tuple[str, dict | None]:
-    if not messages:
-        raise ValueError("messages must not be empty.")
-    backend = _chat_backend(settings.llm_model)
-    if backend == "gemini":
-        return _ask_gemini(messages)
-    if backend == "ollama":
-        return _ask_ollama(messages)
-    if backend == "groq":
-        return _ask_groq(messages)
-    return _ask_deepseek(messages)
-
-
-def _messages_to_gemini(messages: list[dict]) -> dict:
-    system_parts: list[str] = []
-    contents: list[dict] = []
-    for message in messages:
-        role = message.get("role")
-        text = message.get("content") or ""
-        if role == "system":
-            if text:
-                system_parts.append(text)
-            continue
-        gemini_role = "model" if role == "assistant" else "user"
-        contents.append({"role": gemini_role, "parts": [{"text": text}]})
-    payload: dict = {
-        "contents": contents,
-        "generationConfig": {"temperature": settings.temperature},
-    }
-    if system_parts:
-        payload["systemInstruction"] = {
-            "parts": [{"text": "\n\n".join(system_parts)}]
-        }
-    return payload
-
-
-def _gemini_usage(data: dict) -> dict | None:
-    meta = data.get("usageMetadata")
-    if not isinstance(meta, dict):
-        return None
-    prompt = meta.get("promptTokenCount")
-    completion = meta.get("candidatesTokenCount")
-    if prompt is None and completion is None:
-        return None
-    return {"prompt_tokens": prompt, "completion_tokens": completion}
-
-
-def _ask_gemini(messages: list[dict]) -> tuple[str, dict | None]:
-    api_key = (settings.gemini_api_key or "").strip()
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is required to ask with Gemini.")
-    model = settings.llm_model
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent"
-    )
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": api_key,
-    }
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(
-                url, headers=headers, json=_messages_to_gemini(messages)
-            )
-            response.raise_for_status()
-            data = response.json()
-    except httpx.HTTPError as exc:
-        _raise_http_error(exc, "LLM request")
-
-    candidates = data.get("candidates") or []
-    if not candidates:
-        raise RuntimeError("LLM response was missing candidates.")
-    parts = ((candidates[0].get("content") or {}).get("parts")) or []
-    content = "".join(part.get("text") or "" for part in parts).strip()
-    if not content:
-        raise RuntimeError("LLM response was missing text.")
-    return content, _gemini_usage(data)
-
-
-def _ask_groq(messages: list[dict]) -> tuple[str, dict | None]:
-    api_key = (settings.groq_api_key or "").strip()
-    if not api_key:
-        raise ValueError("GROQ_API_KEY is required to ask with Groq.")
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": settings.llm_model,
-        "temperature": settings.temperature,
-        "messages": messages,
-    }
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(_GROQ_CHAT_URL, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-    except httpx.HTTPError as exc:
-        _raise_http_error(exc, "LLM request")
-
-    choices = data.get("choices") or []
-    if not choices:
-        raise RuntimeError("LLM response was missing choices.")
-    message = choices[0].get("message") or {}
-    content = (message.get("content") or "").strip()
-    if not content:
-        raise RuntimeError("LLM response was missing text.")
-    usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
-    return content, usage
-
-
-def _ask_deepseek(messages: list[dict]) -> tuple[str, dict | None]:
-    api_key = (settings.deepseek_api_key or "").strip()
-    if not api_key:
-        raise ValueError("DEEPSEEK_API_KEY is required to ask with DeepSeek.")
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": settings.llm_model,
-        "temperature": settings.temperature,
-        "messages": messages,
-        "thinking": {"type": "disabled"},
-    }
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(_DEEPSEEK_CHAT_URL, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-    except httpx.HTTPError as exc:
-        _raise_http_error(exc, "LLM request")
-
-    choices = data.get("choices") or []
-    if not choices:
-        raise RuntimeError("LLM response was missing choices.")
-    message = choices[0].get("message") or {}
-    content = (message.get("content") or "").strip()
-    if not content:
-        raise RuntimeError("LLM response was missing text.")
-    usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
-    return content, usage
-
-
-def _ollama_usage(data: dict) -> dict | None:
-    prompt = data.get("prompt_eval_count")
-    completion = data.get("eval_count")
-    if prompt is None and completion is None:
-        return None
-    return {"prompt_tokens": prompt, "completion_tokens": completion}
-
-
-def _ask_ollama(messages: list[dict]) -> tuple[str, dict | None]:
-    base = (settings.ollama_base_url or "http://127.0.0.1:11434").rstrip("/")
-    url = f"{base}/api/chat"
-    payload = {
-        "model": settings.llm_model,
-        "messages": messages,
-        "stream": False,
-        "options": {"temperature": settings.temperature},
-    }
-    try:
-        with httpx.Client(timeout=120.0) as client:
-            response = client.post(url, json=payload)
-            response.raise_for_status()
-            data = response.json()
-    except httpx.ConnectError as exc:
-        raise RuntimeError(
-            f"Ollama is not reachable at {base}. Start Ollama and pull llama3.2."
-        ) from exc
-    except httpx.HTTPError as exc:
-        _raise_http_error(exc, "LLM request")
-
-    message = data.get("message") or {}
-    content = (message.get("content") or "").strip()
-    if not content:
-        raise RuntimeError("LLM response was missing text.")
-    return content, _ollama_usage(data)
 
 
 def ask(question: str, llm_model: str | None = None) -> AskResponse:
