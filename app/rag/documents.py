@@ -1,0 +1,139 @@
+"""Load markdown/text files and split them into overlapping chunks."""
+
+import re
+from pathlib import Path
+
+from app.config import PROJECT_ROOT
+
+_ALLOWED_SUFFIXES = {".md", ".txt"}
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+# Rough char stand-in for tokens (~4 chars/token): ~500 target, ~800 max, ~80 overlap.
+_TARGET_CHARS = 2000
+_MAX_CHARS = 3200
+_OVERLAP_CHARS = 320
+
+
+def load_documents(docs_dir: Path) -> list[dict]:
+    """Return a list of {path, text} dicts for markdown/text files under docs_dir."""
+    docs_dir = Path(docs_dir).expanduser().resolve()
+    if not docs_dir.is_dir():
+        raise FileNotFoundError(f"Docs directory not found: {docs_dir}")
+
+    documents: list[dict] = []
+    for path in sorted(docs_dir.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in _ALLOWED_SUFFIXES:
+            continue
+        text = path.read_text(encoding="utf-8")
+        try:
+            stored_path = path.relative_to(PROJECT_ROOT).as_posix()
+        except ValueError:
+            stored_path = path.as_posix()
+        documents.append({"path": stored_path, "text": text})
+    return documents
+
+
+def _split_into_sections(text: str) -> list[tuple[str | None, str]]:
+    """Split markdown into (heading, section_text) pairs. Heading may be None."""
+    sections: list[tuple[str | None, str]] = []
+    heading: str | None = None
+    buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal heading, buf
+        body = "".join(buf).strip()
+        if body:
+            sections.append((heading, body))
+        buf = []
+
+    for line in text.splitlines(keepends=True):
+        match = _HEADING_RE.match(line.rstrip("\n"))
+        if match:
+            flush()
+            heading = match.group(2).strip()
+            buf = [line]
+        else:
+            buf.append(line)
+    flush()
+    return sections
+
+
+def _overlap_tail(text: str) -> str:
+    if len(text) <= _OVERLAP_CHARS:
+        return text
+    tail = text[-_OVERLAP_CHARS:]
+    space = tail.find(" ")
+    if space != -1:
+        tail = tail[space + 1 :]
+    return tail.strip()
+
+
+def _split_long_paragraph(text: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    length = len(text)
+    while start < length:
+        end = min(start + _TARGET_CHARS, length)
+        if end < length:
+            cut = text.rfind(" ", start, end)
+            if cut > start:
+                end = cut
+        piece = text[start:end].strip()
+        if piece:
+            parts.append(piece)
+        if end >= length:
+            break
+        start = end
+        while start < length and text[start] == " ":
+            start += 1
+    return parts or [text]
+
+
+def _pack_paragraphs(paragraphs: list[str]) -> list[str]:
+    units: list[str] = []
+    for paragraph in paragraphs:
+        if len(paragraph) > _MAX_CHARS:
+            units.extend(_split_long_paragraph(paragraph))
+        else:
+            units.append(paragraph)
+
+    packed: list[str] = []
+    buf = ""
+    for unit in units:
+        candidate = f"{buf}\n\n{unit}" if buf else unit
+        if buf and len(candidate) > _TARGET_CHARS:
+            packed.append(buf)
+            tail = _overlap_tail(buf)
+            buf = f"{tail}\n\n{unit}" if tail else unit
+        else:
+            buf = candidate
+    if buf:
+        packed.append(buf)
+    return packed
+
+
+def chunk_text(documents: list[dict]) -> list[dict]:
+    """Return chunks with text plus metadata (source, chunk_index, heading)."""
+    chunks: list[dict] = []
+    for document in documents:
+        text = (document.get("text") or "").strip()
+        if not text:
+            continue
+        source = document["path"]
+        chunk_index = 0
+        for heading, section in _split_into_sections(text):
+            paragraphs = [
+                part.strip() for part in re.split(r"\n\s*\n", section) if part.strip()
+            ]
+            if not paragraphs:
+                continue
+            for part in _pack_paragraphs(paragraphs):
+                chunks.append(
+                    {
+                        "text": part,
+                        "source": source,
+                        "chunk_index": chunk_index,
+                        "heading": heading,
+                    }
+                )
+                chunk_index += 1
+    return chunks
