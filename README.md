@@ -16,7 +16,7 @@ question → embed question → search similar chunks ────┘
                          log (chunks used, tokens, latency)
 ```
 
-Pipeline steps live in `app/rag/pipeline.py`. HTTP routes in `app/api/routes.py` call `ingest`, `search`, and `ask`.
+Pipeline steps live under `app/rag/`: load/chunk in `documents.py`, embeddings in `embeddings.py`, the local index in `index.py`, prompts in `prompt.py`, chat providers in `chat.py`. `pipeline.py` wires `ingest`, `search`, and `ask`. HTTP routes in `app/api/routes.py` call those three.
 
 ## Setup
 
