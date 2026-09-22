@@ -5,6 +5,7 @@ import pytest
 
 import app.rag.pipeline as pipeline
 from app.config import settings
+from app.models import ExtractedInfo, TimeScope
 from app.rag.pipeline import search
 
 
@@ -156,3 +157,104 @@ def test_search_invalid_index_json(
     monkeypatch.setattr(settings, "index_path", index_path)
     with pytest.raises(ValueError, match="not valid JSON"):
         search("What is Ask My Docs?")
+
+
+def _nba_chunks() -> list[dict]:
+    return [
+        {
+            "text": "James won titles with Miami in 2012 and 2013.",
+            "source": "docs/nba/lebron-james.md",
+            "chunk_index": 0,
+            "heading": "The Decision and Miami Heat (2010–2014)",
+            "entities": ["LeBron James", "Miami Heat"],
+            "metadata_filters": {"topic": "championships"},
+            "time_scope": {"start": 2010, "end": 2014},
+            "embedding": [1.0, 0.0, 0.0],
+        },
+        {
+            "text": "Curry won MVP in 2015 and 2016.",
+            "source": "docs/nba/stephen-curry.md",
+            "chunk_index": 0,
+            "heading": "Championships and awards",
+            "entities": ["Stephen Curry"],
+            "metadata_filters": {"topic": "awards"},
+            "time_scope": {"start": 2015, "end": 2016},
+            "embedding": [0.99, 0.01, 0.0],
+        },
+    ]
+
+
+def test_search_filters_chunks_by_extracted_entities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    _write_index(index_path, _nba_chunks())
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "top_k", 5)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0, 0.0]],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extract_info",
+        lambda text, *, kind: ExtractedInfo(entities=["LeBron James"]),
+    )
+
+    results = search("How many titles did LeBron win in Miami?")
+
+    assert [chunk["source"] for chunk in results] == ["docs/nba/lebron-james.md"]
+    assert "entities" not in results[0]
+
+
+def test_search_filters_chunks_by_time_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    _write_index(index_path, _nba_chunks())
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "top_k", 5)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0, 0.0]],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extract_info",
+        lambda text, *, kind: ExtractedInfo(time_scope=TimeScope(start=2012, end=2013)),
+    )
+
+    results = search("What happened in 2012 and 2013?")
+
+    assert [chunk["source"] for chunk in results] == ["docs/nba/lebron-james.md"]
+
+
+def test_search_falls_back_when_filters_match_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    _write_index(index_path, _nba_chunks())
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "top_k", 5)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0, 0.0]],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extract_info",
+        lambda text, *, kind: ExtractedInfo(
+            entities=["Tokyo"],
+            time_scope=TimeScope(start=2026, end=2026),
+        ),
+    )
+
+    results = search("What is the weather in Tokyo tomorrow?")
+
+    assert [chunk["source"] for chunk in results] == [
+        "docs/nba/lebron-james.md",
+        "docs/nba/stephen-curry.md",
+    ]

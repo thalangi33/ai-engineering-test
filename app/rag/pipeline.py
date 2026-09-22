@@ -2,8 +2,8 @@
 
 1. load_documents  — read text from settings.docs_dir (app.rag.documents)
 2. chunk_text      — split documents into overlapping chunks with metadata
-3. ingest          — embed chunks and store them locally
-4. search          — embed the question, return top_k chunks
+3. ingest          — extract chunk info, embed, and store them locally
+4. search          — extract question intent, filter chunks, embed, return top_k
 5. build_prompt    — system instructions + retrieved context + question (app.rag.prompt)
 6. ask_llm         — call the selected provider; temperature 0 (app.rag.chat)
 7. ask             — search → prompt → LLM → citations from chunk metadata
@@ -21,7 +21,7 @@ from typing import Iterator
 import httpx  # noqa: F401 — tests patch pipeline.httpx.Client
 
 from app.config import settings
-from app.models import AskResponse, Citation, IngestResponse
+from app.models import AskResponse, Citation, ExtractedInfo, IngestResponse
 from app.rag.chat import ask_llm, ask_llm_with_usage, chat_backend, list_chat_models
 from app.rag.documents import chunk_text, load_documents
 from app.rag.embeddings import (
@@ -30,6 +30,7 @@ from app.rag.embeddings import (
     embedding_backend,
     list_embedding_models,
 )
+from app.rag.extract import chunk_extraction_text, chunk_matches, extract_info
 from app.rag.index import cosine_similarity, read_index, write_index
 from app.rag.prompt import build_prompt, citations_from_chunks, looks_like_refuse
 
@@ -48,7 +49,9 @@ __all__ = [
     "ask",
     "ask_llm",
     "build_prompt",
+    "chunk_matches",
     "chunk_text",
+    "extract_info",
     "ingest",
     "list_chat_models",
     "list_embedding_models",
@@ -80,8 +83,13 @@ def _print_search_results(question: str, results: list[dict]) -> None:
         )
 
 
+def _filter_chunks(query_info: ExtractedInfo, chunks: list[dict]) -> list[dict]:
+    filtered = [chunk for chunk in chunks if chunk_matches(query_info, chunk)]
+    return filtered if filtered else chunks
+
+
 def ingest(embedding_model: str | None = None) -> IngestResponse:
-    """Load, chunk, embed, and persist the vector index."""
+    """Load, chunk, extract, embed, and persist the vector index."""
     model = settings.embedding_model
     if embedding_model is not None:
         embedding_model = embedding_model.strip()
@@ -90,6 +98,9 @@ def ingest(embedding_model: str | None = None) -> IngestResponse:
             model = embedding_model
     documents = load_documents(settings.docs_dir)
     chunks = chunk_text(documents)
+    extracted = [
+        extract_info(chunk_extraction_text(chunk), kind="chunk") for chunk in chunks
+    ]
     with _using_setting("embedding_model", model):
         embeddings = _embed_texts([chunk["text"] for chunk in chunks])
     stored = [
@@ -98,9 +109,12 @@ def ingest(embedding_model: str | None = None) -> IngestResponse:
             "source": chunk["source"],
             "chunk_index": chunk["chunk_index"],
             "heading": chunk["heading"],
+            "entities": info.entities,
+            "metadata_filters": info.metadata_filters,
+            "time_scope": info.time_scope.model_dump() if info.time_scope else None,
             "embedding": embedding,
         }
-        for chunk, embedding in zip(chunks, embeddings, strict=True)
+        for chunk, info, embedding in zip(chunks, extracted, embeddings, strict=True)
     ]
     _write_index(
         {
@@ -123,7 +137,7 @@ def ingest(embedding_model: str | None = None) -> IngestResponse:
 
 
 def search(question: str, top_k: int | None = None) -> list[dict]:
-    """Return the top_k most similar chunks for the question."""
+    """Return the top_k most similar chunks for the question after intent filters."""
     question = (question or "").strip()
     if not question:
         raise ValueError("Question must not be empty.")
@@ -137,13 +151,16 @@ def search(question: str, top_k: int | None = None) -> list[dict]:
         _print_search_results(question, [])
         return []
 
+    query_info = extract_info(question, kind="question")
+    candidates = _filter_chunks(query_info, stored_chunks)
+
     model = payload.get("embedding_model") or settings.embedding_model
     with _using_setting("embedding_model", model):
         query_vectors = _embed_texts([question], for_query=True)
     query_vector = query_vectors[0]
 
     scored: list[tuple[float, dict]] = []
-    for chunk in stored_chunks:
+    for chunk in candidates:
         embedding = chunk.get("embedding")
         if not embedding:
             continue

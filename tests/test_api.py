@@ -68,7 +68,7 @@ def test_ingest_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["document_count"] == 6
+    assert body["document_count"] == len(pipeline.load_documents(settings.docs_dir))
     assert body["chunk_count"] >= 1
     assert (tmp_path / "index.json").is_file()
 

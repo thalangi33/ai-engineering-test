@@ -19,10 +19,11 @@ def test_ingest_sample_docs_writes_index(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr(pipeline, "_embed_texts", _fake_embed)
 
     result = ingest()
-    expected_chunks = chunk_text(load_documents(settings.docs_dir))
+    expected_docs = load_documents(settings.docs_dir)
+    expected_chunks = chunk_text(expected_docs)
 
     assert result.status == "ok"
-    assert result.document_count == 6
+    assert result.document_count == len(expected_docs)
     assert result.chunk_count == len(expected_chunks)
     assert result.chunk_count
     assert "chunks" in (result.message or "")
@@ -42,6 +43,9 @@ def test_ingest_sample_docs_writes_index(tmp_path: Path, monkeypatch: pytest.Mon
         assert stored["source"] == original["source"]
         assert stored["chunk_index"] == original["chunk_index"]
         assert stored["heading"] == original["heading"]
+        assert stored["entities"] == []
+        assert stored["metadata_filters"] == {}
+        assert stored["time_scope"] is None
         assert stored["embedding"]
         assert all(isinstance(value, float) for value in stored["embedding"])
 
@@ -110,6 +114,39 @@ def test_ingest_uses_requested_embedding_model(
     assert result.embedding_model == "all-MiniLM-L6-v2"
     payload = json.loads(index_path.read_text(encoding="utf-8"))
     assert payload["embedding_model"] == "all-MiniLM-L6-v2"
+
+
+def test_ingest_stores_extracted_chunk_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.models import ExtractedInfo, TimeScope
+
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "lebron.md").write_text(
+        "# LeBron\n\nJames won titles in Miami.", encoding="utf-8"
+    )
+    index_path = tmp_path / "index.json"
+    monkeypatch.setattr(settings, "docs_dir", docs_dir)
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(pipeline, "_embed_texts", _fake_embed)
+    monkeypatch.setattr(
+        pipeline,
+        "extract_info",
+        lambda text, *, kind: ExtractedInfo(
+            entities=["LeBron James", "Miami Heat"],
+            metadata_filters={"topic": "championships"},
+            time_scope=TimeScope(start=2010, end=2014),
+        ),
+    )
+
+    ingest()
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    stored = payload["chunks"][0]
+    assert stored["entities"] == ["LeBron James", "Miami Heat"]
+    assert stored["metadata_filters"] == {"topic": "championships"}
+    assert stored["time_scope"] == {"start": 2010, "end": 2014}
+    assert "intent" not in stored
 
 
 def test_embed_texts_empty_returns_empty() -> None:
