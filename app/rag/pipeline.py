@@ -70,6 +70,16 @@ def _using_setting(name: str, value: str) -> Iterator[None]:
         setattr(settings, name, previous)
 
 
+def _resolve_chat_model(llm_model: str | None) -> str:
+    model = settings.llm_model
+    if llm_model is not None:
+        llm_model = llm_model.strip()
+        if llm_model:
+            _chat_backend(llm_model)
+            model = llm_model
+    return model
+
+
 def _print_search_results(question: str, results: list[dict]) -> None:
     print(f"[search] {question!r} → {len(results)} chunk(s)")
     for index, chunk in enumerate(results, start=1):
@@ -88,7 +98,9 @@ def _filter_chunks(query_info: ExtractedInfo, chunks: list[dict]) -> list[dict]:
     return filtered if filtered else chunks
 
 
-def ingest(embedding_model: str | None = None) -> IngestResponse:
+def ingest(
+    embedding_model: str | None = None, llm_model: str | None = None
+) -> IngestResponse:
     """Load, chunk, extract, embed, and persist the vector index."""
     model = settings.embedding_model
     if embedding_model is not None:
@@ -96,11 +108,13 @@ def ingest(embedding_model: str | None = None) -> IngestResponse:
         if embedding_model:
             _embedding_backend(embedding_model)
             model = embedding_model
+    chat_model = _resolve_chat_model(llm_model)
     documents = load_documents(settings.docs_dir)
     chunks = chunk_text(documents)
-    extracted = [
-        extract_info(chunk_extraction_text(chunk), kind="chunk") for chunk in chunks
-    ]
+    with _using_setting("llm_model", chat_model):
+        extracted = [
+            extract_info(chunk_extraction_text(chunk), kind="chunk") for chunk in chunks
+        ]
     with _using_setting("embedding_model", model):
         embeddings = _embed_texts([chunk["text"] for chunk in chunks])
     stored = [
@@ -209,12 +223,7 @@ def ask(question: str, llm_model: str | None = None) -> AskResponse:
     if not question:
         raise ValueError("Question must not be empty.")
 
-    model = settings.llm_model
-    if llm_model is not None:
-        llm_model = llm_model.strip()
-        if llm_model:
-            _chat_backend(llm_model)
-            model = llm_model
+    model = _resolve_chat_model(llm_model)
 
     with _using_setting("llm_model", model):
         started = time.perf_counter()

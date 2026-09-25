@@ -47,7 +47,8 @@ def chat_models() -> ChatModelsResponse:
 def ingest(body: Annotated[IngestRequest | None, Body()] = None) -> IngestResponse:
     try:
         embedding_model = body.embedding_model if body else None
-        return pipeline.ingest(embedding_model=embedding_model)
+        llm_model = body.llm_model if body else None
+        return pipeline.ingest(embedding_model=embedding_model, llm_model=llm_model)
     except _RAG_HTTP_ERRORS as exc:
         raise _http_error(exc) from exc
 

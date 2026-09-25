@@ -10,9 +10,9 @@
     <main>
       <h1>Ask My Docs</h1>
       <p class="lede">
-        Chat over files in <code>docs/</code>. Choose an embedding model, ingest,
-        pick a chat model, then ask. Answers come from retrieved chunks, with
-        source filenames.
+        Chat over files in <code>docs/</code>. Choose an embedding model and a
+        chat / extract model, ingest, then ask. Extraction and answers use the
+        chat model. Answers come from retrieved chunks, with source filenames.
       </p>
       <div class="toolbar">
         <label class="model-picker" for="embedding-model">
@@ -20,7 +20,7 @@
           <select id="embedding-model"></select>
         </label>
         <label class="model-picker" for="chat-model">
-          Chat model
+          Chat / extract model
           <select id="chat-model"></select>
         </label>
         <button type="button" class="secondary" id="ingest">Ingest docs</button>
@@ -140,7 +140,10 @@
           const response = await fetch("/api/ingest", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ embedding_model: modelSelect.value }),
+            body: JSON.stringify({
+              embedding_model: modelSelect.value,
+              llm_model: chatSelect.value,
+            }),
           });
           if (!response.ok) {
             setStatus(await readError(response), true);

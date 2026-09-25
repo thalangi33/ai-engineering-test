@@ -116,6 +116,44 @@ def test_ingest_uses_requested_embedding_model(
     assert payload["embedding_model"] == "all-MiniLM-L6-v2"
 
 
+def test_ingest_uses_requested_llm_model_for_extract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.models import ExtractedInfo
+
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "note.md").write_text("# Hello\n\nShort note.", encoding="utf-8")
+    index_path = tmp_path / "index.json"
+    monkeypatch.setattr(settings, "docs_dir", docs_dir)
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "llm_model", "gemini-2.0-flash")
+    monkeypatch.setattr(pipeline, "_embed_texts", _fake_embed)
+    seen: dict = {}
+
+    def fake_extract(text: str, *, kind: str) -> ExtractedInfo:
+        seen["kind"] = kind
+        seen["model"] = settings.llm_model
+        return ExtractedInfo()
+
+    monkeypatch.setattr(pipeline, "extract_info", fake_extract)
+
+    ingest(llm_model="deepseek-v4-flash")
+
+    assert seen["kind"] == "chunk"
+    assert seen["model"] == "deepseek-v4-flash"
+    assert settings.llm_model == "gemini-2.0-flash"
+
+
+def test_ingest_rejects_unknown_chat_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "docs_dir", tmp_path / "docs")
+    monkeypatch.setattr(settings, "index_path", tmp_path / "index.json")
+    with pytest.raises(ValueError, match="Unsupported chat model"):
+        ingest(llm_model="gpt-4o-mini")
+
+
 def test_ingest_stores_extracted_chunk_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

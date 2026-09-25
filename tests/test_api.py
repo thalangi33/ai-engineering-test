@@ -23,6 +23,7 @@ def test_index_serves_chat_page() -> None:
     assert "Ask My Docs" in response.text
     assert 'id="embedding-model"' in response.text
     assert 'id="chat-model"' in response.text
+    assert "Chat / extract model" in response.text
     assert "/api/ask" in response.text
     assert ">Ask</button>" in response.text
 
@@ -92,6 +93,44 @@ def test_ingest_accepts_embedding_model_in_body(
     assert body["embedding_model"] == "gemini-embedding-001"
     stored = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
     assert stored["embedding_model"] == "gemini-embedding-001"
+
+
+def test_ingest_accepts_llm_model_in_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.models import ExtractedInfo
+
+    monkeypatch.setattr(settings, "index_path", tmp_path / "index.json")
+    monkeypatch.setattr(settings, "llm_model", "gemini-2.0-flash")
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts: [[1.0, 0.0] for _ in texts],
+    )
+    seen: dict = {}
+
+    def fake_extract(text: str, *, kind: str) -> ExtractedInfo:
+        seen["model"] = settings.llm_model
+        return ExtractedInfo()
+
+    monkeypatch.setattr(pipeline, "extract_info", fake_extract)
+
+    response = client.post(
+        "/api/ingest",
+        json={
+            "embedding_model": "all-MiniLM-L6-v2",
+            "llm_model": "deepseek-v4-flash",
+        },
+    )
+    assert response.status_code == 200
+    assert seen["model"] == "deepseek-v4-flash"
+    assert settings.llm_model == "gemini-2.0-flash"
+
+
+def test_ingest_rejects_unknown_chat_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    response = client.post("/api/ingest", json={"llm_model": "gpt-4o-mini"})
+    assert response.status_code == 400
+    assert "unsupported chat model" in response.json()["detail"].lower()
 
 
 def test_ingest_reports_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -25,6 +25,7 @@ class ExtractedInfo(BaseModel):
 
 class IngestRequest(BaseModel):
     embedding_model: str | None = None
+    llm_model: str | None = None
 
 
 class IngestResponse(BaseModel):
