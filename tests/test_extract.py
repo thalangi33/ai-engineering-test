@@ -129,3 +129,12 @@ def test_chunk_matches_ignores_unset_filters() -> None:
         ExtractedInfo(entities=["Ask My Docs"], time_scope=TimeScope(start=2020, end=2021)),
         chunk,
     ) is True
+
+
+def test_chunk_matches_entity_alias() -> None:
+    curry = {"entities": ["Stephen Curry"], "metadata_filters": {}, "time_scope": None}
+    lebron = {"entities": ["LeBron James"], "metadata_filters": {}, "time_scope": None}
+    assert chunk_matches(ExtractedInfo(entities=["Curry"]), curry) is True
+    assert chunk_matches(ExtractedInfo(entities=["LeBron"]), lebron) is True
+    assert chunk_matches(ExtractedInfo(entities=["Curry"]), lebron) is False
+    assert chunk_matches(ExtractedInfo(entities=["Jokic"]), curry) is False

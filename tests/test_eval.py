@@ -32,13 +32,26 @@ def _case(**overrides):
 def test_load_cases_from_repo() -> None:
     cases = load_cases()
     ids = [case["id"] for case in cases]
-    assert ids == ["easy-1", "easy-2", "easy-3", "paraphrase-1", "refuse-1"]
+    assert ids == [
+        "easy-1",
+        "easy-2",
+        "easy-3",
+        "paraphrase-1",
+        "refuse-1",
+        "compare-1",
+        "compare-2",
+    ]
     refuse = next(case for case in cases if case["id"] == "refuse-1")
     assert refuse["should_refuse"] is True
     assert refuse["expected_source"] is None
+    compare = next(case for case in cases if case["id"] == "compare-1")
+    assert compare["expected_sources"] == [
+        "docs/nba/stephen-curry.md",
+        "docs/nba/lebron-james.md",
+    ]
     for case in cases:
         if not case["should_refuse"]:
-            assert case["expected_source"]
+            assert case.get("expected_source") or case.get("expected_sources")
             assert case["must_contain"]
 
 
@@ -126,6 +139,62 @@ def test_score_answer_fails_when_model_refuses_known_question() -> None:
     passed, detail = score_answer(_case(), "I don't know", [])
     assert passed is False
     assert "refused" in detail
+
+
+def test_score_retrieval_requires_every_expected_source() -> None:
+    case = _case(
+        id="compare-1",
+        expected_source=None,
+        expected_sources=["docs/nba/stephen-curry.md", "docs/nba/lebron-james.md"],
+        must_contain=["first unanimous MVP", "South Beach"],
+    )
+    passed, detail = score_retrieval(
+        case,
+        [
+            {"source": "docs/nba/stephen-curry.md"},
+            {"source": "docs/nba/lebron-james.md"},
+        ],
+    )
+    assert passed is True
+    assert "stephen-curry.md" in detail
+    assert "lebron-james.md" in detail
+
+    failed, detail = score_retrieval(case, [{"source": "docs/nba/stephen-curry.md"}])
+    assert failed is False
+    assert "lebron-james.md" in detail
+    assert "not in top-" in detail
+
+
+def test_score_answer_rejects_forbidden_phrase() -> None:
+    case = _case(
+        id="compare-2",
+        expected_source=None,
+        expected_sources=["docs/nba/stephen-curry.md", "docs/nba/lebron-james.md"],
+        must_contain=["first unanimous MVP", "South Beach"],
+        must_not_contain=["better player"],
+    )
+    citations = [
+        Citation(source="docs/nba/stephen-curry.md", snippet="unanimous MVP"),
+        Citation(source="docs/nba/lebron-james.md", snippet="South Beach"),
+    ]
+    answer = (
+        "Curry was the first unanimous MVP. LeBron announced he was going to South Beach."
+    )
+    passed, _ = score_answer(case, answer, citations)
+    assert passed is True
+
+    ranked, detail = score_answer(case, answer + " Curry is the better player.", citations)
+    assert ranked is False
+    assert "forbidden phrase" in detail
+
+    one_cite, detail = score_answer(
+        case,
+        answer,
+        [Citation(source="docs/nba/stephen-curry.md", snippet="unanimous MVP")],
+    )
+    assert one_cite is False
+    assert "missing citation" in detail
+    assert "lebron-james.md" in detail
 
 
 def test_missing_phrases_is_case_insensitive() -> None:

@@ -79,13 +79,44 @@ def _norm(value: str) -> str:
     return " ".join(value.lower().split())
 
 
+def entities_alias(left: str, right: str) -> bool:
+    """True when two entity names are the same or one is a whole-word form of the other."""
+    a, b = _norm(left), _norm(right)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    if len(short) < 3:
+        return False
+    return re.search(rf"(?<![a-z0-9]){re.escape(short)}(?![a-z0-9])", long) is not None
+
+
+def distinct_entities(entities: list[str]) -> list[str]:
+    """Drop blanks and names that alias an earlier entry, preserving order."""
+    kept: list[str] = []
+    for entity in entities:
+        text = (entity or "").strip()
+        if not text:
+            continue
+        if any(entities_alias(text, existing) for existing in kept):
+            continue
+        kept.append(text)
+    return kept
+
+
+def _entities_overlap(query_entities: list[str], chunk_entities: list[str]) -> bool:
+    query_ents = [entity for entity in query_entities if entity and str(entity).strip()]
+    chunk_ents = [entity for entity in chunk_entities if entity and str(entity).strip()]
+    if not query_ents or not chunk_ents:
+        return False
+    return any(entities_alias(query, chunk) for query in query_ents for chunk in chunk_ents)
+
+
 def chunk_matches(query: ExtractedInfo, chunk: dict) -> bool:
     """True when the chunk is compatible with the question extraction."""
-    if query.entities:
-        chunk_ents = {_norm(entity) for entity in chunk.get("entities") or [] if entity}
-        query_ents = {_norm(entity) for entity in query.entities if entity}
-        if not chunk_ents or chunk_ents.isdisjoint(query_ents):
-            return False
+    if query.entities and not _entities_overlap(query.entities, chunk.get("entities") or []):
+        return False
 
     q_time = query.time_scope
     raw_time = chunk.get("time_scope") or {}

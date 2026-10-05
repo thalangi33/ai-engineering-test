@@ -258,3 +258,105 @@ def test_search_falls_back_when_filters_match_nothing(
         "docs/nba/lebron-james.md",
         "docs/nba/stephen-curry.md",
     ]
+
+
+def _comparison_chunks() -> list[dict]:
+    lebron = [
+        {
+            "text": f"LeBron title note {index}.",
+            "source": "docs/nba/lebron-james.md",
+            "chunk_index": index,
+            "heading": "LeBron James",
+            "entities": ["LeBron James"],
+            "metadata_filters": {},
+            "time_scope": None,
+            "embedding": [1.0, 0.0, 0.0],
+        }
+        for index in range(5)
+    ]
+    curry = {
+        "text": "Curry was the first unanimous MVP.",
+        "source": "docs/nba/stephen-curry.md",
+        "chunk_index": 0,
+        "heading": "Championships and awards",
+        "entities": ["Stephen Curry"],
+        "metadata_filters": {},
+        "time_scope": None,
+        "embedding": [0.0, 1.0, 0.0],
+    }
+    return lebron + [curry]
+
+
+def test_search_comparison_reserves_a_chunk_per_entity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    _write_index(index_path, _comparison_chunks())
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "top_k", 5)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0, 0.0]],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extract_info",
+        lambda text, *, kind: ExtractedInfo(
+            intent="comparison",
+            entities=["Curry", "LeBron"],
+        ),
+    )
+
+    results = search("Curry vs LeBron")
+
+    assert len(results) == 5
+    assert "docs/nba/stephen-curry.md" in [chunk["source"] for chunk in results]
+    assert "docs/nba/lebron-james.md" in [chunk["source"] for chunk in results]
+
+
+def test_search_comparison_does_not_fall_back_to_unrelated_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    _write_index(index_path, _nba_chunks())
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "top_k", 5)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0, 0.0]],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extract_info",
+        lambda text, *, kind: ExtractedInfo(
+            intent="comparison",
+            entities=["Nikola Jokic", "Jimmy Butler"],
+        ),
+    )
+
+    assert search("Jokic vs Butler") == []
+
+
+def test_search_fact_alias_keeps_one_player(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    _write_index(index_path, _nba_chunks())
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(settings, "top_k", 5)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[0.0, 1.0, 0.0]],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extract_info",
+        lambda text, *, kind: ExtractedInfo(intent="fact", entities=["Curry"]),
+    )
+
+    results = search("How many titles does Curry have?")
+
+    assert [chunk["source"] for chunk in results] == ["docs/nba/stephen-curry.md"]

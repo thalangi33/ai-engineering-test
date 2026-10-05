@@ -78,17 +78,41 @@ def missing_phrases(text: str, phrases: list[str] | None) -> list[str]:
     return missing
 
 
+def present_phrases(text: str, phrases: list[str] | None) -> list[str]:
+    haystack = (text or "").lower()
+    found: list[str] = []
+    for phrase in phrases or []:
+        needle = (phrase or "").strip().lower()
+        if needle and needle in haystack:
+            found.append(phrase)
+    return found
+
+
+def expected_source_list(case: dict[str, Any]) -> list[str]:
+    """Sources a case must retrieve and cite. `expected_sources` wins when set."""
+    raw = case.get("expected_sources")
+    if isinstance(raw, list):
+        sources = [str(item) for item in raw if item]
+        if sources:
+            return sources
+    one = case.get("expected_source")
+    if one:
+        return [str(one)]
+    return []
+
+
 def score_retrieval(
     case: dict[str, Any], chunks: list[dict[str, Any]]
 ) -> tuple[bool | None, str]:
-    expected = case.get("expected_source")
+    expected = expected_source_list(case)
     sources = [str(chunk.get("source") or "") for chunk in chunks]
     if case.get("should_refuse") or not expected:
         return None, "n/a (no expected source)"
-    if source_in(expected, sources):
-        return True, f"found {expected} in top-{len(chunks)}"
+    missing = [item for item in expected if not source_in(item, sources)]
+    if not missing:
+        return True, f"found {', '.join(expected)} in top-{len(chunks)}"
     listed = ", ".join(sources) if sources else "(none)"
-    return False, f"{expected} not in top-{len(chunks)}: {listed}"
+    return False, f"{', '.join(missing)} not in top-{len(chunks)}: {listed}"
 
 
 def score_answer(
@@ -109,13 +133,16 @@ def score_answer(
         return False, "refused but the answer is in the docs"
     if not (answer or "").strip():
         return False, "empty answer"
-    expected = case.get("expected_source")
-    if expected and not source_in(expected, sources):
-        listed = ", ".join(sources) if sources else "(none)"
-        return False, f"missing citation {expected}: {listed}"
+    listed = ", ".join(sources) if sources else "(none)"
+    for expected in expected_source_list(case):
+        if not source_in(expected, sources):
+            return False, f"missing citation {expected}: {listed}"
     missing = missing_phrases(answer, case.get("must_contain") or [])
     if missing:
         return False, "fluent-but-wrong; missing: " + ", ".join(missing)
+    forbidden = present_phrases(answer, case.get("must_not_contain") or [])
+    if forbidden:
+        return False, "forbidden phrase: " + ", ".join(forbidden)
     return True, "grounded answer with required phrases"
 
 

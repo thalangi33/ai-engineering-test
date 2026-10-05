@@ -4,9 +4,9 @@
 2. chunk_text      — split documents into overlapping chunks with metadata
 3. ingest          — extract chunk info, embed, and store them locally
 4. search          — extract question intent, filter chunks, embed, return top_k
-5. build_prompt    — system instructions + retrieved context + question (app.rag.prompt)
+5. build_prompt    — intent-specific system instructions + context + question
 6. ask_llm         — call the selected provider; temperature 0 (app.rag.chat)
-7. ask             — search → prompt → LLM → citations from chunk metadata
+7. ask             — retrieve once → intent prompt → LLM → citations from chunk metadata
 
 Search still prints retrieved chunks so retrieval can be checked before trusting answers.
 Citations come from retrieved chunk metadata, not from the model inventing filenames.
@@ -30,7 +30,12 @@ from app.rag.embeddings import (
     embedding_backend,
     list_embedding_models,
 )
-from app.rag.extract import chunk_extraction_text, chunk_matches, extract_info
+from app.rag.extract import (
+    chunk_extraction_text,
+    chunk_matches,
+    distinct_entities,
+    extract_info,
+)
 from app.rag.index import cosine_similarity, read_index, write_index
 from app.rag.prompt import build_prompt, citations_from_chunks, looks_like_refuse
 
@@ -98,6 +103,141 @@ def _filter_chunks(query_info: ExtractedInfo, chunks: list[dict]) -> list[dict]:
     return filtered if filtered else chunks
 
 
+def _chunk_key(chunk: dict) -> tuple:
+    return (chunk.get("source"), chunk.get("chunk_index"))
+
+
+def _score_chunks(
+    chunks: list[dict], query_vector: list[float]
+) -> list[tuple[float, dict]]:
+    scored: list[tuple[float, dict]] = []
+    for chunk in chunks:
+        embedding = chunk.get("embedding")
+        if not embedding:
+            continue
+        scored.append((_cosine_similarity(query_vector, embedding), chunk))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored
+
+
+def _result_chunk(score: float, chunk: dict) -> dict:
+    return {
+        "text": chunk["text"],
+        "source": chunk["source"],
+        "chunk_index": chunk["chunk_index"],
+        "heading": chunk.get("heading"),
+        "score": score,
+    }
+
+
+def _top_results(
+    chunks: list[dict], query_vector: list[float], k: int
+) -> list[dict]:
+    ranked = _score_chunks(chunks, query_vector)[:k]
+    return [_result_chunk(score, chunk) for score, chunk in ranked]
+
+
+def _matches_entity(chunk: dict, entity: str) -> bool:
+    return chunk_matches(ExtractedInfo(entities=[entity]), chunk)
+
+
+def _take_ranked(
+    ranked: list[tuple[float, dict]],
+    limit: int,
+    selected: list[tuple[float, dict]],
+    seen: set[tuple],
+) -> None:
+    added = 0
+    for item in ranked:
+        if added >= limit:
+            return
+        key = _chunk_key(item[1])
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(item)
+        added += 1
+
+
+def _comparison_results(
+    entities: list[str],
+    stored_chunks: list[dict],
+    query_vector: list[float],
+    k: int,
+) -> list[dict]:
+    """Reserve slots per entity so one name cannot fill the whole result list."""
+    groups = [
+        _score_chunks(
+            [chunk for chunk in stored_chunks if _matches_entity(chunk, entity)],
+            query_vector,
+        )
+        for entity in entities
+    ]
+    if not any(groups):
+        return []
+
+    shared_slots = 1 if k > len(entities) else 0
+    entity_slots = k - shared_slots
+    base, extra = divmod(entity_slots, len(entities))
+    quotas = [base + (1 if index < extra else 0) for index in range(len(entities))]
+
+    selected: list[tuple[float, dict]] = []
+    seen: set[tuple] = set()
+    for ranked, quota in zip(groups, quotas):
+        _take_ranked(ranked, quota, selected, seen)
+
+    if len(selected) < k:
+        dual: list[dict] = []
+        single: list[dict] = []
+        for chunk in stored_chunks:
+            hits = sum(1 for entity in entities if _matches_entity(chunk, entity))
+            if hits >= 2:
+                dual.append(chunk)
+            elif hits == 1:
+                single.append(chunk)
+        _take_ranked(_score_chunks(dual, query_vector), k - len(selected), selected, seen)
+        if len(selected) < k:
+            _take_ranked(
+                _score_chunks(single, query_vector), k - len(selected), selected, seen
+            )
+
+    selected.sort(key=lambda item: item[0], reverse=True)
+    return [_result_chunk(score, chunk) for score, chunk in selected[:k]]
+
+
+def _retrieve(
+    question: str, top_k: int | None = None
+) -> tuple[list[dict], ExtractedInfo]:
+    """Extract the question once and return chunks plus that extraction."""
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("Question must not be empty.")
+    k = settings.top_k if top_k is None else top_k
+    if k < 1:
+        raise ValueError("top_k must be at least 1.")
+
+    payload = _read_index()
+    stored_chunks = payload["chunks"]
+    if not stored_chunks:
+        _print_search_results(question, [])
+        return [], ExtractedInfo()
+
+    query_info = extract_info(question, kind="question")
+    model = payload.get("embedding_model") or settings.embedding_model
+    with _using_setting("embedding_model", model):
+        query_vector = _embed_texts([question], for_query=True)[0]
+
+    entities = distinct_entities(query_info.entities)
+    if query_info.intent == "comparison" and len(entities) >= 2:
+        results = _comparison_results(entities, stored_chunks, query_vector, k)
+    else:
+        candidates = _filter_chunks(query_info, stored_chunks)
+        results = _top_results(candidates, query_vector, k)
+
+    _print_search_results(question, results)
+    return results, query_info
+
+
 def ingest(
     embedding_model: str | None = None, llm_model: str | None = None
 ) -> IngestResponse:
@@ -152,48 +292,8 @@ def ingest(
 
 def search(question: str, top_k: int | None = None) -> list[dict]:
     """Return the top_k most similar chunks for the question after intent filters."""
-    question = (question or "").strip()
-    if not question:
-        raise ValueError("Question must not be empty.")
-    k = settings.top_k if top_k is None else top_k
-    if k < 1:
-        raise ValueError("top_k must be at least 1.")
-
-    payload = _read_index()
-    stored_chunks = payload["chunks"]
-    if not stored_chunks:
-        _print_search_results(question, [])
-        return []
-
-    query_info = extract_info(question, kind="question")
-    candidates = _filter_chunks(query_info, stored_chunks)
-
-    model = payload.get("embedding_model") or settings.embedding_model
-    with _using_setting("embedding_model", model):
-        query_vectors = _embed_texts([question], for_query=True)
-    query_vector = query_vectors[0]
-
-    scored: list[tuple[float, dict]] = []
-    for chunk in candidates:
-        embedding = chunk.get("embedding")
-        if not embedding:
-            continue
-        score = _cosine_similarity(query_vector, embedding)
-        scored.append((score, chunk))
-    scored.sort(key=lambda item: item[0], reverse=True)
-
-    results = [
-        {
-            "text": chunk["text"],
-            "source": chunk["source"],
-            "chunk_index": chunk["chunk_index"],
-            "heading": chunk.get("heading"),
-            "score": score,
-        }
-        for score, chunk in scored[:k]
-    ]
-    _print_search_results(question, results)
-    return results
+    chunks, _query_info = _retrieve(question, top_k=top_k)
+    return chunks
 
 
 def _print_ask_result(
@@ -227,14 +327,14 @@ def ask(question: str, llm_model: str | None = None) -> AskResponse:
 
     with _using_setting("llm_model", model):
         started = time.perf_counter()
-        chunks = search(question)
+        chunks, query_info = _retrieve(question)
         if not chunks:
             answer = "I don't know"
             elapsed_ms = (time.perf_counter() - started) * 1000
             _print_ask_result(question, answer, [], elapsed_ms)
             return AskResponse(answer=answer, citations=[], llm_model=model)
 
-        messages = build_prompt(question, chunks)
+        messages = build_prompt(question, chunks, intent=query_info.intent)
         answer, usage = _ask_llm(messages)
         citations = [] if _looks_like_refuse(answer) else _citations_from_chunks(chunks)
         elapsed_ms = (time.perf_counter() - started) * 1000

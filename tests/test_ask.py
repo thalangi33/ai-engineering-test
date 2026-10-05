@@ -6,6 +6,7 @@ import pytest
 
 import app.rag.pipeline as pipeline
 from app.config import settings
+from app.models import ExtractedInfo
 from app.rag.pipeline import ask, ask_llm, build_prompt
 
 
@@ -60,6 +61,33 @@ def test_build_prompt_handles_empty_chunks() -> None:
     messages = build_prompt("What is the weather in Tokyo?", [])
     assert "(none)" in messages[1]["content"]
     assert "What is the weather in Tokyo?" in messages[1]["content"]
+
+
+def test_build_prompt_comparison_changes_system_text_only() -> None:
+    chunks = [
+        {
+            "text": "He has four NBA titles with Golden State.",
+            "source": "docs/nba/stephen-curry.md",
+            "heading": "Championships and awards",
+        }
+    ]
+    messages = build_prompt("Curry vs LeBron", chunks, intent="comparison")
+
+    system = messages[0]["content"].lower()
+    assert "comparing" in system
+    assert "winner" in system
+    assert "i don't know" in system
+    user = messages[1]["content"]
+    assert "Curry vs LeBron" in user
+    assert "docs/nba/stephen-curry.md" in user
+    assert "He has four NBA titles with Golden State." in user
+
+    fact = build_prompt("Curry vs LeBron", chunks)
+    assert "comparing" not in fact[0]["content"].lower()
+    stats = build_prompt("Curry vs LeBron", chunks, intent="stats")
+    assert "numbers" in stats[0]["content"].lower()
+    timeline = build_prompt("Curry vs LeBron", chunks, intent="timeline")
+    assert "years" in timeline[0]["content"].lower()
 
 
 def test_ask_llm_posts_groq_chat_completion(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -406,6 +434,67 @@ def test_ask_omits_citations_when_model_refuses(
 
     assert result.answer == "I don't know"
     assert result.citations == []
+
+
+def test_ask_sends_comparison_prompt_for_comparison_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_path = tmp_path / "index.json"
+    _write_index(
+        index_path,
+        [
+            {
+                "text": "Curry was the first unanimous MVP.",
+                "source": "docs/nba/stephen-curry.md",
+                "chunk_index": 0,
+                "heading": "Championships and awards",
+                "entities": ["Stephen Curry"],
+                "embedding": [1.0, 0.0],
+            },
+            {
+                "text": "LeBron took his talents to South Beach.",
+                "source": "docs/nba/lebron-james.md",
+                "chunk_index": 0,
+                "heading": "The Decision and Miami Heat (2010–2014)",
+                "entities": ["LeBron James"],
+                "embedding": [0.0, 1.0],
+            },
+        ],
+    )
+    monkeypatch.setattr(settings, "index_path", index_path)
+    monkeypatch.setattr(
+        pipeline,
+        "_embed_texts",
+        lambda texts, for_query=False: [[1.0, 0.0]],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extract_info",
+        lambda text, *, kind: ExtractedInfo(
+            intent="comparison",
+            entities=["Stephen Curry", "LeBron James"],
+        ),
+    )
+    seen: dict = {}
+
+    def fake_llm(messages: list[dict]) -> tuple[str, None]:
+        seen["system"] = messages[0]["content"]
+        seen["user"] = messages[1]["content"]
+        return "Curry was the first unanimous MVP. LeBron went to South Beach.", None
+
+    monkeypatch.setattr(pipeline, "_ask_llm", fake_llm)
+
+    result = ask("Curry vs LeBron")
+
+    assert "comparing" in seen["system"].lower()
+    assert "winner" in seen["system"].lower()
+    assert "Curry vs LeBron" in seen["user"]
+    assert "docs/nba/stephen-curry.md" in seen["user"]
+    assert "docs/nba/lebron-james.md" in seen["user"]
+    assert [citation.source for citation in result.citations] == [
+        "docs/nba/stephen-curry.md",
+        "docs/nba/lebron-james.md",
+    ]
 
 
 def test_ask_rejects_empty_question() -> None:

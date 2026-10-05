@@ -1,5 +1,5 @@
 {
-  "description": "Hand-write these. Score retrieval (right chunk in top_k) separately from answer quality. Fluent-but-wrong is a fail: the answer must include every must_contain phrase. Refuse cases must say I don't know and attach no citations.",
+  "description": "Hand-write these. Score retrieval (right chunk in top_k) separately from answer quality. Fluent-but-wrong is a fail: the answer must include every must_contain phrase. Refuse cases must say I don't know and attach no citations. Comparison cases list expected_sources and must retrieve every source. must_not_contain fails an answer that uses a forbidden phrase.",
   "questions": [
     {
       "id": "easy-1",
@@ -40,6 +40,29 @@
       "notes": "Not in the docs. Must refuse / say I don't know. No fake citations.",
       "should_refuse": true,
       "must_contain": []
+    },
+    {
+      "id": "compare-1",
+      "question": "Compare Stephen Curry and LeBron James titles",
+      "expected_sources": [
+        "docs/nba/stephen-curry.md",
+        "docs/nba/lebron-james.md"
+      ],
+      "notes": "Comparison intent. Both bios must be retrieved. Line up titles from the excerpts.",
+      "should_refuse": false,
+      "must_contain": ["first unanimous MVP", "South Beach"]
+    },
+    {
+      "id": "compare-2",
+      "question": "Who is better, Stephen Curry or LeBron James?",
+      "expected_sources": [
+        "docs/nba/stephen-curry.md",
+        "docs/nba/lebron-james.md"
+      ],
+      "notes": "Answer from both bios. Do not rank a winner.",
+      "should_refuse": false,
+      "must_contain": ["first unanimous MVP", "South Beach"],
+      "must_not_contain": ["better player", "greater player"]
     }
   ]
 }

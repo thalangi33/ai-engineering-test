@@ -44,7 +44,7 @@ python -m app
 
 ## Evals
 
-Score `evals/questions.json`. Retrieval (expected source in top-k) is scored separately from answer quality. Fluent-but-wrong answers fail if they miss a `must_contain` phrase. Refuse cases must say `I don't know` with no citations.
+Score `evals/questions.json`. Retrieval (expected source in top-k) is scored separately from answer quality. Fluent-but-wrong answers fail if they miss a `must_contain` phrase. Refuse cases must say `I don't know` with no citations. Comparison cases list `expected_sources` and must retrieve every source. `must_not_contain` fails an answer that uses a forbidden phrase.
 
 ```bash
 # Retrieval only (no chat API key). MiniLM embeds locally.
@@ -63,10 +63,10 @@ Exit code 1 if any scored check fails. `--json` prints machine-readable results.
 | `load_documents` | Read files under `docs/` |
 | `chunk_text` | Split with metadata (`source`, `chunk_index`) |
 | `ingest` | Embed and persist a local index |
-| `search` | Top-k chunks for a question |
-| `build_prompt` | Answer only from context; otherwise "I don't know" |
+| `search` | Top-k chunks; a comparison reserves chunks for each entity |
+| `build_prompt` | System prompt follows the question intent; otherwise "I don't know" |
 | `ask_llm` | Gemini, Ollama llama3.2, Groq, or DeepSeek; temperature 0 |
-| `ask` | Search → prompt → LLM → citations from chunk metadata |
+| `ask` | Retrieve once → intent prompt → LLM → citations from chunk metadata |
 | `python -m evals` | Score retrieval vs answer on `evals/questions.json` |
 
 Sample notes in `docs/` are ingested into the local index. Hand-written eval questions live in `evals/questions.json`.
