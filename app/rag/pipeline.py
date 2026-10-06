@@ -2,7 +2,7 @@
 
 1. load_documents  — read text from settings.docs_dir (app.rag.documents)
 2. chunk_text      — split documents into overlapping chunks with metadata
-3. ingest          — extract chunk info, embed, and store them locally
+3. ingest          — extract chunk info in batches, embed, and store them locally
 4. search          — extract question intent, filter chunks, embed, return top_k
 5. build_prompt    — intent-specific system instructions + context + question
 6. ask_llm         — call the selected provider; temperature 0 (app.rag.chat)
@@ -34,6 +34,7 @@ from app.rag.extract import (
     chunk_extraction_text,
     chunk_matches,
     distinct_entities,
+    extract_chunks,
     extract_info,
 )
 from app.rag.index import cosine_similarity, read_index, write_index
@@ -56,6 +57,7 @@ __all__ = [
     "build_prompt",
     "chunk_matches",
     "chunk_text",
+    "extract_chunks",
     "extract_info",
     "ingest",
     "list_chat_models",
@@ -252,9 +254,9 @@ def ingest(
     documents = load_documents(settings.docs_dir)
     chunks = chunk_text(documents)
     with _using_setting("llm_model", chat_model):
-        extracted = [
-            extract_info(chunk_extraction_text(chunk), kind="chunk") for chunk in chunks
-        ]
+        extracted = extract_chunks(
+            [chunk_extraction_text(chunk) for chunk in chunks]
+        )
     with _using_setting("embedding_model", model):
         embeddings = _embed_texts([chunk["text"] for chunk in chunks])
     stored = [

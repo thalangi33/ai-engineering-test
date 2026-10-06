@@ -6,6 +6,7 @@ from app.models import ExtractedInfo, TimeScope
 from app.rag.extract import (
     chunk_extraction_text,
     chunk_matches,
+    extract_chunks,
     extract_info,
 )
 
@@ -129,6 +130,139 @@ def test_chunk_matches_ignores_unset_filters() -> None:
         ExtractedInfo(entities=["Ask My Docs"], time_scope=TimeScope(start=2020, end=2021)),
         chunk,
     ) is True
+
+
+def _item(chunk_id: int, entity: str, *, topic: str | None = None) -> dict:
+    filters = {"doc_type": "player"}
+    if topic:
+        filters["topic"] = topic
+    return {
+        "id": chunk_id,
+        "entities": [entity],
+        "metadata_filters": filters,
+        "time_scope": {"start": 2010, "end": 2014},
+    }
+
+
+def test_extract_chunks_one_call_for_several_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict] = []
+
+    def fake_llm(messages: list[dict], **kwargs) -> str:
+        calls.append({"messages": messages, **kwargs})
+        return json.dumps({"items": [_item(0, "LeBron James"), _item(2, "Stephen Curry"), _item(1, "Miami Heat", topic="championships")]})
+
+    monkeypatch.setattr("app.rag.extract.ask_llm", fake_llm)
+    infos = extract_chunks(
+        ["LeBron joined Miami.", "The Heat won titles.", "Curry plays for Golden State."],
+        batch_size=8,
+    )
+    assert len(calls) == 1
+    assert calls[0]["max_tokens"] == 150 * 3
+    user = calls[0]["messages"][1]["content"]
+    assert user.startswith("chunks:")
+    assert "0:\nLeBron joined Miami." in user
+    assert "1:\nThe Heat won titles." in user
+    assert infos[0].entities == ["LeBron James"]
+    assert infos[1].entities == ["Miami Heat"]
+    assert infos[1].metadata_filters == {"doc_type": "player", "topic": "championships"}
+    assert infos[1].time_scope == TimeScope(start=2010, end=2014)
+    assert infos[2].entities == ["Stephen Curry"]
+    assert all(info.intent is None for info in infos)
+
+
+def test_extract_chunks_splits_on_batch_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_llm(messages: list[dict], **kwargs) -> str:
+        user = messages[1]["content"]
+        calls.append(user)
+        count = user.count("\n\n")
+        # ids restart at 0 inside each batch
+        return json.dumps({"items": [_item(index, f"Entity {len(calls)}-{index}") for index in range(count)]})
+
+    monkeypatch.setattr("app.rag.extract.ask_llm", fake_llm)
+    infos = extract_chunks(["a", "b", "c"], batch_size=2)
+    assert len(calls) == 2
+    assert "0:\na" in calls[0]
+    assert "1:\nb" in calls[0]
+    assert "0:\nc" in calls[1]
+    assert [info.entities[0] for info in infos] == ["Entity 1-0", "Entity 1-1", "Entity 2-0"]
+
+
+def test_extract_chunks_bad_item_keeps_neighbors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.rag.extract.ask_llm",
+        lambda messages, **kwargs: json.dumps(
+            {
+                "items": [
+                    _item(0, "LeBron James"),
+                    {"id": 1, "intent": "banter", "entities": ["nope"]},
+                    _item(2, "Stephen Curry"),
+                ]
+            }
+        ),
+    )
+    infos = extract_chunks(["one", "two", "three"], batch_size=8)
+    assert infos[0].entities == ["LeBron James"]
+    assert infos[1] == ExtractedInfo()
+    assert infos[2].entities == ["Stephen Curry"]
+
+
+def test_extract_chunks_bad_json_falls_back_to_single_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_llm(messages: list[dict], **kwargs) -> str:
+        user = messages[1]["content"]
+        calls.append(user)
+        if user.startswith("chunks:"):
+            return "nope"
+        entity = "LeBron James" if "Miami" in user else "Stephen Curry"
+        return json.dumps(_item(0, entity) | {"intent": "fact"})
+
+    monkeypatch.setattr("app.rag.extract.ask_llm", fake_llm)
+    infos = extract_chunks(["James in Miami.", "Curry in Oakland."], batch_size=8)
+    assert len(calls) == 3
+    assert calls[0].startswith("chunks:")
+    assert infos[0].entities == ["LeBron James"]
+    assert infos[1].entities == ["Stephen Curry"]
+    assert all(info.intent is None for info in infos)
+
+
+def test_extract_chunks_skips_blank_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_llm(messages: list[dict], **kwargs) -> str:
+        calls.append(messages[1]["content"])
+        return json.dumps({"items": [_item(0, "LeBron James")]})
+
+    monkeypatch.setattr("app.rag.extract.ask_llm", fake_llm)
+    infos = extract_chunks(["  ", "James in Miami."], batch_size=8)
+    assert len(calls) == 1
+    assert "0:\nJames in Miami." in calls[0]
+    assert "1:" not in calls[0]
+    assert infos[0] == ExtractedInfo()
+    assert infos[1].entities == ["LeBron James"]
+
+
+def test_extract_chunks_empty_input_skips_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = {"llm": False}
+
+    def boom(messages: list[dict], **kwargs) -> str:
+        called["llm"] = True
+        return "{}"
+
+    monkeypatch.setattr("app.rag.extract.ask_llm", boom)
+    assert extract_chunks([]) == []
+    assert called["llm"] is False
+
+
+def test_extract_chunks_rejects_nonpositive_batch_size() -> None:
+    with pytest.raises(ValueError, match="batch size"):
+        extract_chunks(["hello"], batch_size=0)
 
 
 def test_chunk_matches_entity_alias() -> None:
