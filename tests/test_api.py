@@ -109,11 +109,11 @@ def test_ingest_accepts_llm_model_in_body(
     )
     seen: dict = {}
 
-    def fake_extract(text: str, *, kind: str) -> ExtractedInfo:
+    def fake_extract(texts: list[str], **kwargs) -> list[ExtractedInfo]:
         seen["model"] = settings.llm_model
-        return ExtractedInfo()
+        return [ExtractedInfo() for _ in texts]
 
-    monkeypatch.setattr(pipeline, "extract_info", fake_extract)
+    monkeypatch.setattr(pipeline, "extract_chunks", fake_extract)
 
     response = client.post(
         "/api/ingest",

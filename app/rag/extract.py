@@ -7,6 +7,7 @@ import re
 
 from pydantic import ValidationError
 
+from app.config import settings
 from app.models import ExtractedInfo
 from app.rag.chat import ask_llm
 
@@ -28,6 +29,29 @@ _SYSTEM = (
     "null if none\n"
     "- do not invent facts"
 )
+
+_CHUNK_BATCH_SYSTEM = (
+    "Extract structured info for each chunk. Reply with JSON only, no markdown.\n"
+    "{\n"
+    '  "items": [\n'
+    "    {\n"
+    '      "id": 0,\n'
+    '      "entities": ["..."],\n'
+    '      "metadata_filters": {"doc_type": "player|team|app", "topic": "..."},\n'
+    '      "time_scope": {"start": 2010, "end": 2014}\n'
+    "    }\n"
+    "  ]\n"
+    "}\n"
+    "Rules:\n"
+    "- one item per chunk id; ids must match the input\n"
+    "- entities: people, teams, product names; skip generics\n"
+    "- metadata_filters: omit keys you are not sure about\n"
+    "- time_scope: years the text is about; if a single year, set start and end to it; "
+    "null if none\n"
+    "- do not invent facts"
+)
+# Room for one chunk's entities, filters, and year range. Caps the batch reply.
+_TOKENS_PER_CHUNK = 150
 
 
 def chunk_extraction_text(chunk: dict) -> str:
@@ -73,6 +97,84 @@ def extract_info(text: str, *, kind: str) -> ExtractedInfo:
     if kind == "chunk":
         info.intent = None
     return info
+
+
+def _batch_user_message(texts: list[str]) -> str:
+    blocks = ["chunks:"]
+    for index, text in enumerate(texts):
+        blocks.append(f"{index}:\n{text}")
+    return "\n\n".join(blocks)
+
+
+def _chunk_info(payload: dict) -> ExtractedInfo:
+    info = ExtractedInfo.model_validate(payload)
+    info.intent = None
+    return info
+
+
+def _parse_chunk_batch(raw: str, count: int) -> list[ExtractedInfo] | None:
+    """Align items by id. None when the reply is not a usable items array."""
+    try:
+        payload = _parse_json_object(raw)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return None
+    results = [ExtractedInfo() for _ in range(count)]
+    seen: set[int] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if index < 0 or index >= count or index in seen:
+            continue
+        seen.add(index)
+        try:
+            results[index] = _chunk_info(item)
+        except (ValidationError, TypeError, ValueError):
+            results[index] = ExtractedInfo()
+    if count > 0 and not seen:
+        return None
+    return results
+
+
+def _extract_chunk_group(texts: list[str]) -> list[ExtractedInfo]:
+    raw = ask_llm(
+        [
+            {"role": "system", "content": _CHUNK_BATCH_SYSTEM},
+            {"role": "user", "content": _batch_user_message(texts)},
+        ],
+        max_tokens=_TOKENS_PER_CHUNK * len(texts),
+    )
+    parsed = _parse_chunk_batch(raw, len(texts))
+    if parsed is None:
+        return [extract_info(text, kind="chunk") for text in texts]
+    return parsed
+
+
+def extract_chunks(
+    texts: list[str], *, batch_size: int | None = None
+) -> list[ExtractedInfo]:
+    """Extract chunk metadata in batches. One result per input, empty on failure."""
+    size = settings.extract_batch_size if batch_size is None else batch_size
+    if size < 1:
+        raise ValueError("extract batch size must be at least 1")
+    results = [ExtractedInfo() for _ in texts]
+    pending: list[tuple[int, str]] = []
+    for index, text in enumerate(texts):
+        stripped = (text or "").strip()
+        if stripped:
+            pending.append((index, stripped))
+    for start in range(0, len(pending), size):
+        group = pending[start : start + size]
+        extracted = _extract_chunk_group([text for _, text in group])
+        for (index, _), info in zip(group, extracted, strict=True):
+            results[index] = info
+    return results
 
 
 def _norm(value: str) -> str:
