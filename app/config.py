@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     top_k: int = 5
     temperature: float = 0.0
+    # Chunks per DeepSeek/Gemini/Groq/Ollama call while extracting ingest metadata.
+    extract_batch_size: int = 8
 
 
 settings = Settings()

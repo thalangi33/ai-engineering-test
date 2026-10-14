@@ -62,7 +62,7 @@ Exit code 1 if any scored check fails. `--json` prints machine-readable results.
 |---|---|
 | `load_documents` | Read files under `docs/` |
 | `chunk_text` | Split with metadata (`source`, `chunk_index`) |
-| `ingest` | Embed and persist a local index |
+| `ingest` | Extract chunk metadata in batches, embed, and persist a local index |
 | `search` | Top-k chunks; a comparison reserves chunks for each entity |
 | `build_prompt` | System prompt follows the question intent; otherwise "I don't know" |
 | `ask_llm` | Gemini, Ollama llama3.2, Groq, or DeepSeek; temperature 0 |

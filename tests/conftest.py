@@ -12,3 +12,8 @@ def skip_llm_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
         "extract_info",
         lambda text, *, kind: ExtractedInfo(),
     )
+    monkeypatch.setattr(
+        pipeline,
+        "extract_chunks",
+        lambda texts, **kwargs: [ExtractedInfo() for _ in texts],
+    )

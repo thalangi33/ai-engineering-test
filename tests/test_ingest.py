@@ -131,16 +131,16 @@ def test_ingest_uses_requested_llm_model_for_extract(
     monkeypatch.setattr(pipeline, "_embed_texts", _fake_embed)
     seen: dict = {}
 
-    def fake_extract(text: str, *, kind: str) -> ExtractedInfo:
-        seen["kind"] = kind
+    def fake_extract(texts: list[str], **kwargs) -> list[ExtractedInfo]:
+        seen["count"] = len(texts)
         seen["model"] = settings.llm_model
-        return ExtractedInfo()
+        return [ExtractedInfo() for _ in texts]
 
-    monkeypatch.setattr(pipeline, "extract_info", fake_extract)
+    monkeypatch.setattr(pipeline, "extract_chunks", fake_extract)
 
     ingest(llm_model="deepseek-v4-flash")
 
-    assert seen["kind"] == "chunk"
+    assert seen["count"] == 1
     assert seen["model"] == "deepseek-v4-flash"
     assert settings.llm_model == "gemini-2.0-flash"
 
@@ -170,12 +170,15 @@ def test_ingest_stores_extracted_chunk_fields(
     monkeypatch.setattr(pipeline, "_embed_texts", _fake_embed)
     monkeypatch.setattr(
         pipeline,
-        "extract_info",
-        lambda text, *, kind: ExtractedInfo(
-            entities=["LeBron James", "Miami Heat"],
-            metadata_filters={"topic": "championships"},
-            time_scope=TimeScope(start=2010, end=2014),
-        ),
+        "extract_chunks",
+        lambda texts, **kwargs: [
+            ExtractedInfo(
+                entities=["LeBron James", "Miami Heat"],
+                metadata_filters={"topic": "championships"},
+                time_scope=TimeScope(start=2010, end=2014),
+            )
+            for _ in texts
+        ],
     )
 
     ingest()

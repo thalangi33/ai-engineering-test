@@ -51,25 +51,29 @@ def list_chat_models() -> ChatModelsResponse:
     )
 
 
-def ask_llm(messages: list[dict]) -> str:
+def ask_llm(messages: list[dict], *, max_tokens: int | None = None) -> str:
     """Send messages to the LLM and return the assistant text."""
-    return ask_llm_with_usage(messages)[0]
+    return ask_llm_with_usage(messages, max_tokens=max_tokens)[0]
 
 
-def ask_llm_with_usage(messages: list[dict]) -> tuple[str, dict | None]:
+def ask_llm_with_usage(
+    messages: list[dict], *, max_tokens: int | None = None
+) -> tuple[str, dict | None]:
     if not messages:
         raise ValueError("messages must not be empty.")
     backend = chat_backend(settings.llm_model)
     if backend == "gemini":
-        return _ask_gemini(messages)
+        return _ask_gemini(messages, max_tokens=max_tokens)
     if backend == "ollama":
-        return _ask_ollama(messages)
+        return _ask_ollama(messages, max_tokens=max_tokens)
     if backend == "groq":
-        return _ask_groq(messages)
-    return _ask_deepseek(messages)
+        return _ask_groq(messages, max_tokens=max_tokens)
+    return _ask_deepseek(messages, max_tokens=max_tokens)
 
 
-def _messages_to_gemini(messages: list[dict]) -> dict:
+def _messages_to_gemini(
+    messages: list[dict], *, max_tokens: int | None = None
+) -> dict:
     system_parts: list[str] = []
     contents: list[dict] = []
     for message in messages:
@@ -85,6 +89,8 @@ def _messages_to_gemini(messages: list[dict]) -> dict:
         "contents": contents,
         "generationConfig": {"temperature": settings.temperature},
     }
+    if max_tokens is not None:
+        payload["generationConfig"]["maxOutputTokens"] = max_tokens
     if system_parts:
         payload["systemInstruction"] = {
             "parts": [{"text": "\n\n".join(system_parts)}]
@@ -103,7 +109,9 @@ def _gemini_usage(data: dict) -> dict | None:
     return {"prompt_tokens": prompt, "completion_tokens": completion}
 
 
-def _ask_gemini(messages: list[dict]) -> tuple[str, dict | None]:
+def _ask_gemini(
+    messages: list[dict], *, max_tokens: int | None = None
+) -> tuple[str, dict | None]:
     api_key = (settings.gemini_api_key or "").strip()
     if not api_key:
         raise ValueError("GEMINI_API_KEY is required to ask with Gemini.")
@@ -119,7 +127,9 @@ def _ask_gemini(messages: list[dict]) -> tuple[str, dict | None]:
     try:
         with httpx.Client(timeout=60.0) as client:
             response = client.post(
-                url, headers=headers, json=_messages_to_gemini(messages)
+                url,
+                headers=headers,
+                json=_messages_to_gemini(messages, max_tokens=max_tokens),
             )
             response.raise_for_status()
             data = response.json()
@@ -155,6 +165,7 @@ def _ask_chat_completions(
     api_key: str,
     missing_key: str,
     extra_payload: dict | None = None,
+    max_tokens: int | None = None,
 ) -> tuple[str, dict | None]:
     if not api_key:
         raise ValueError(missing_key)
@@ -168,6 +179,8 @@ def _ask_chat_completions(
         "messages": messages,
         **(extra_payload or {}),
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     try:
         with httpx.Client(timeout=60.0) as client:
             response = client.post(url, headers=headers, json=payload)
@@ -178,22 +191,28 @@ def _ask_chat_completions(
     return _parse_chat_completion(data)
 
 
-def _ask_groq(messages: list[dict]) -> tuple[str, dict | None]:
+def _ask_groq(
+    messages: list[dict], *, max_tokens: int | None = None
+) -> tuple[str, dict | None]:
     return _ask_chat_completions(
         messages,
         url=_GROQ_CHAT_URL,
         api_key=(settings.groq_api_key or "").strip(),
         missing_key="GROQ_API_KEY is required to ask with Groq.",
+        max_tokens=max_tokens,
     )
 
 
-def _ask_deepseek(messages: list[dict]) -> tuple[str, dict | None]:
+def _ask_deepseek(
+    messages: list[dict], *, max_tokens: int | None = None
+) -> tuple[str, dict | None]:
     return _ask_chat_completions(
         messages,
         url=_DEEPSEEK_CHAT_URL,
         api_key=(settings.deepseek_api_key or "").strip(),
         missing_key="DEEPSEEK_API_KEY is required to ask with DeepSeek.",
         extra_payload={"thinking": {"type": "disabled"}},
+        max_tokens=max_tokens,
     )
 
 
@@ -205,7 +224,9 @@ def _ollama_usage(data: dict) -> dict | None:
     return {"prompt_tokens": prompt, "completion_tokens": completion}
 
 
-def _ask_ollama(messages: list[dict]) -> tuple[str, dict | None]:
+def _ask_ollama(
+    messages: list[dict], *, max_tokens: int | None = None
+) -> tuple[str, dict | None]:
     base = (settings.ollama_base_url or "http://127.0.0.1:11434").rstrip("/")
     url = f"{base}/api/chat"
     payload = {
@@ -214,6 +235,8 @@ def _ask_ollama(messages: list[dict]) -> tuple[str, dict | None]:
         "stream": False,
         "options": {"temperature": settings.temperature},
     }
+    if max_tokens is not None:
+        payload["options"]["num_predict"] = max_tokens
     try:
         with httpx.Client(timeout=120.0) as client:
             response = client.post(url, json=payload)
